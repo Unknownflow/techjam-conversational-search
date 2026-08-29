@@ -51,8 +51,29 @@ class IntentRouter:
 class DialogStateMachine:
     """Accumulate slots, retire superseded preferences, and expose dialog phase."""
 
-    MATERIALS = {"cotton", "polyester", "nylon", "leather", "wool", "spandex", "silk", "rayon", "fabric"}
-    COLORS = {"black", "white", "blue", "red", "pink", "green", "brown", "gray", "grey", "purple", "yellow", "orange"}
+    MATERIALS = {
+        "acetate", "acrylic", "aluminum", "aluminium", "bamboo", "brass",
+        "canvas", "carbon", "cashmere", "ceramic", "chiffon", "chrome",
+        "corduroy", "cork", "cotton", "crystal", "denim", "elastic", "fabric",
+        "faux fur", "faux leather", "felt", "fiberglass", "flannel", "foam",
+        "fur", "glass", "gold", "hemp", "iron", "jute", "lace", "latex", "leather",
+        "linen", "lycra", "mesh", "metal", "microfiber", "modal", "neoprene", "nickel",
+        "nylon", "paper", "pearl", "pewter", "plastic", "pleather", "polyamide", "polyester",
+        "polypropylene", "polyurethane", "porcelain", "rayon", "resin", "rubber", "satin",
+        "silicone", "silk", "silver", "spandex", "stainless steel", "steel", "suede",
+        "synthetic", "tencel", "textile", "titanium", "tungsten", "velvet", "vinyl",
+        "viscose", "wood", "zinc",
+    }
+    COLORS = {
+        "aqua", "aquamarine", "apricot", "azure", "beige", "black", "blush", "blue",
+        "bronze", "brown", "burgundy", "camel", "charcoal", "chocolate", "clear",
+        "cobalt", "copper", "coral", "cream", "cyan", "ecru", "emerald", "fluorescent",
+        "fuchsia", "gold", "gray", "green", "grey", "indigo", "ivory", "khaki", "lavender", "lilac", "lime",
+        "magenta", "maroon", "mint", "multicolor", "mustard", "navy", "olive", "orange",
+        "neon", "peach", "periwinkle", "pink", "plum", "purple", "raspberry", "red", "rose",
+        "rust", "salmon", "sand", "scarlet", "silver", "slate", "tan", "taupe", "teal", "turquoise", "violet",
+        "white", "wine", "yellow",
+    }
 
     @classmethod
     def slot_kind(cls, value: str, source: str) -> str:
