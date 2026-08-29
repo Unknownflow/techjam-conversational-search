@@ -14,9 +14,24 @@ The evaluation rewards three properties:
 
 ## Implemented Approach
 
-### 1. In-memory hybrid retrieval
+### 1. Intent routing and hybrid pipeline
 
-The catalog is loaded into an in-memory SQLite FTS5 index. It indexes product title, category, features, details, store, price, and description. This keeps execution local and avoids the operational overhead of a vector database.
+`IntentRouter` assigns the initial request to one of two execution paths:
+
+| Route | Trigger | Retrieval behavior |
+| --- | --- | --- |
+| Buying | Explicit requirements such as “key requirement”, “need”, or a budget | Preserves category and hard constraints, then prioritizes conjunctive FTS retrieval for precision. |
+| Browsing | Exploratory wording such as “exploring”, “browse”, or “ideas” | Uses the same grounded lexical routes first, then activates an in-memory vector discovery route only when fewer than 80 lexical candidates are available. |
+
+The pipeline is therefore **intent routing → multi-route candidate retrieval → constraint/semantic ranking**. Keyword, category, conjunction, fallback-OR, and optional dense candidates are deduplicated into one bounded working set before ranking.
+
+The dense discovery route is a 192-dimensional, deterministic feature-hashed text embedding over product title, category, and attributes. It is NumPy-backed when NumPy is present and fails safely to the lexical pipeline when it is not. It is deliberately gated: experiments showed that always adding broad vector candidates slightly reduced MRR by introducing weakly related, popular products into otherwise precise result sets.
+
+`Agent` also accepts an optional `semantic_reranker` callable. This is the integration point for a local or API-backed LLM reranker when credentials, an approved model, and a latency budget are available. Its normalized contribution is capped, so current-session hard constraints remain decisive. The submitted default uses no external model and therefore has zero reported token cost.
+
+### 2. In-memory hybrid retrieval
+
+The catalog is loaded into an in-memory SQLite FTS5 index. It indexes product title, category, features, details, store, price, and description. The index uses Porter stemming, so lexical retrieval tolerates ordinary inflection changes such as `wallet` versus `wallets`. This keeps execution local and avoids the operational overhead of a vector database.
 
 Retrieval uses two complementary routes:
 
@@ -25,7 +40,7 @@ Retrieval uses two complementary routes:
 
 If a restrictive individual query has no results, it falls back to an OR query over the same distinctive terms. Candidates from all routes are merged and deduplicated before reranking.
 
-### 2. Structured conversational state
+### 3. Structured conversational state
 
 Each session stores:
 
@@ -38,13 +53,13 @@ The extraction logic preserves both category and hard requirement in a Buying re
 
 The state is additive for normal information accumulation. When a user declines a requested attribute (for example, “I don't have a preference”), that attribute is made eligible again rather than being treated as useful information. This lets the agent continue the dialogue without wasting the remainder of the ten-turn budget.
 
-### 3. High-information clarification policy
+### 4. High-information clarification policy
 
 The agent first requests `other`, which permits the simulator to disclose the next most useful one or two constraints. This is followed by a feature/construction question if more information is needed. A no-preference response reopens the question so a subsequent clarification can still collect signal.
 
 This policy is deliberately compact: the system retrieves after every customer message and asks only when additional information is likely to reduce ambiguity. That directly supports Mean Turns to Conversion.
 
-### 4. Constraint-aware reranking
+### 5. Constraint-aware reranking
 
 Candidates are reranked using:
 
@@ -55,7 +70,7 @@ Candidates are reranked using:
 
 The primary score remains based on stated requirements. This keeps the ranking interpretable and makes the system responsive to intent changes instead of using profile data as a replacement for current needs.
 
-### 5. Catalog-quality tie-breaker
+### 6. Catalog-quality tie-breaker
 
 Many catalog products are indistinguishable from the available conversational constraints: several products can be leather, red, and in the same category. For these near-ties, the agent applies a deliberately modest quality prior derived only from catalog-visible fields:
 
@@ -88,7 +103,7 @@ Analysis of the scenario results highlighted several issues:
 | Boundary sessions used unnecessary turns | A declined clarification was treated as a completed slot. | Reopen the attribute after a no-preference response. |
 | Exact-match products remained tied | Metadata alone can leave many valid products with equal semantic match scores. | Add a small rating/review-count quality tie-breaker. |
 
-After the changes, the full 200-session public evaluation produced:
+After the initial changes, the full 200-session public evaluation produced:
 
 ```json
 {
@@ -101,15 +116,28 @@ After the changes, the full 200-session public evaluation produced:
 }
 ```
 
+The latest robustness pass added Porter stemming to FTS5. It improved the complete public evaluation without using any session labels:
+
+```json
+{
+  "sample_count": 200,
+  "hit_rate_at_10": 0.995,
+  "mrr": 0.670552,
+  "mttc": 1.705,
+  "efficiency": 0.9295,
+  "recommended_technical_score": 0.884566
+}
+```
+
 ### Improvement summary
 
 | Metric | Before | After | Change |
 | --- | ---: | ---: | ---: |
-| Hit Rate@10 | 0.765 | 0.990 | +0.225 |
-| MRR | 0.592990 | 0.666379 | +0.073389 |
-| MTTC | 4.395 | 1.735 | -2.660 turns |
-| Efficiency | 0.6605 | 0.9265 | +0.2660 |
-| Technical score | 0.692497 | 0.880214 | +0.187717 |
+| Hit Rate@10 | 0.765 | 0.995 | +0.230 |
+| MRR | 0.592990 | 0.670552 | +0.077562 |
+| MTTC | 4.395 | 1.705 | -2.690 turns |
+| Efficiency | 0.6605 | 0.9295 | +0.2690 |
+| Technical score | 0.692497 | 0.884566 | +0.192069 |
 
 ## Generalization and Private-Test Considerations
 
