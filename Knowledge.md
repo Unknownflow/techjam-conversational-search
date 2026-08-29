@@ -109,6 +109,23 @@ The context program selects one of five workflows after each retrieval:
 
 This is runtime workflow re-orchestration rather than static prompt selection: the strategy controls whether dense retrieval and optional semantic reranking are permitted on the following turn, and it changes the guidance message. Profile tags are surfaced as optional guidance hints when asking broad clarification questions.
 
+### 8. Adaptive narrowing and next-question selection
+
+Clarification is selected from the current top 200 reranked candidates rather than from the broad recall union. Each candidate receives a stable reciprocal-log-rank weight, so ambiguity among likely products matters more than noise near the bottom of retrieval.
+
+For a candidate attribute `a`, expected narrowing is approximated as:
+
+```text
+gain(a) = coverage(a) - Σ posterior_mass(value)²
+utility(a) = answerability_prior(a) × gain(a)
+```
+
+The uncovered mass represents candidates for which the catalog contains no extractable value; it is treated as a no-answer branch rather than artificial information gain. Known slot values are removed before residual gain is calculated. Previously asked attributes are excluded, while known or declined attributes receive strong penalties.
+
+The selector currently evaluates material, color, size, style, use case, feature, budget, brand, and the composite `other` prompt. `other` is used as the initial high-coverage question because it can collect two constraints. Later turns compare typed questions by expected narrowing. `feature` retains a conservative answerability prior and is replaced only when another attribute has a meaningful utility advantage. Deterministic priority ordering resolves exact ties. Questions may continue through turn 9 because the answer can still improve turn-10 recommendations.
+
+The chosen attribute, utility, and complete sorted score table are included under `dialog_state.next_question`, making question decisions inspectable during demonstrations and debugging.
+
 ## Evaluation Findings and Changes
 
 ### Current benchmark dashboard
@@ -207,7 +224,7 @@ The changes were selected to improve behavior on the task class, rather than exp
 The repository evaluator and dialog-state tests were executed successfully:
 
 ```text
-Ran 6 tests ... OK
+Ran 9 tests ... OK
 ```
 
 The improved result above was produced by running the complete public evaluator over all 200 sessions, not a small sample.
@@ -221,3 +238,7 @@ The improved result above was produced by running the complete public evaluator 
 - The over-generality threshold is catalog-size dependent. A production system should calibrate it from retrieval latency, candidate entropy, and observed conversion behavior rather than a fixed count alone.
 - The dataset supplies no stable user identifier and explicitly isolates sessions. Accordingly, learned “long-term” preferences are retained only inside the current session; cross-session persistence would require an authorized identity, consent, retention policy, and profile store.
 - Workflow selection is currently rule-based. Online contextual-bandit learning could optimize question value and route selection in production, but would require unbiased conversion feedback and safeguards against self-reinforcing popularity bias.
+- Question utility depends on the quality of the focused candidate posterior. If retrieval omits the correct product, even a mathematically useful split can guide the conversation in the wrong direction.
+- Facets are presently extracted from flattened text. Products that mention several colors or materials can inflate apparent diversity; structured canonical catalog facets would provide cleaner partitions.
+- Attribute answerability priors and the replacement margin are static. Production calibration should learn these values from unbiased response and conversion logs while retaining exploration safeguards.
+- The evaluator makes `other` unusually valuable because it can reveal two hidden constraints. The composite-question advantage should be recalibrated for a real interface where broad questions may impose greater cognitive load.

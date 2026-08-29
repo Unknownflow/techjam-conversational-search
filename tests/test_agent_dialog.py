@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from starter.agent import Agent
+from starter.agent import Agent, NextQuestionSelector
 
 
 class AgentDialogTest(unittest.TestCase):
@@ -76,6 +76,57 @@ class AgentDialogTest(unittest.TestCase):
             self.assertEqual(state["context_version"], 8)
             self.assertEqual(state["long_term_profile"]["base_tags"], ["fit", "comfort"])
             self.assertIn("leather", state["profile_terms"])
+
+    def test_next_question_maximizes_expected_candidate_reduction(self) -> None:
+        candidates = [
+            *("red cotton shoe" for _ in range(4)),
+            *("blue cotton shoe" for _ in range(3)),
+            "blue leather shoe",
+        ]
+        state = {
+            "slots": [],
+            "asked": {"other", "feature"},
+            "long_term_profile": {"rejected_attributes": set()},
+        }
+        state["question_scores"] = NextQuestionSelector.score(candidates, state)
+        attribute, _message, _utility = NextQuestionSelector.choose(state)
+        self.assertEqual(attribute, "color")
+        self.assertGreater(
+            state["question_scores"]["color"],
+            state["question_scores"]["material"],
+        )
+
+    def test_known_or_declined_facets_are_discounted(self) -> None:
+        candidates = [
+            *("red cotton shoe" for _ in range(2)),
+            *("red leather shoe" for _ in range(2)),
+            *("blue cotton shoe" for _ in range(2)),
+            *("blue leather shoe" for _ in range(2)),
+        ]
+        state = {
+            "slots": [{"kind": "color", "active": True}],
+            "asked": {"other", "feature"},
+            "long_term_profile": {"rejected_attributes": {"color"}},
+        }
+        state["question_scores"] = NextQuestionSelector.score(candidates, state)
+        attribute, _message, _utility = NextQuestionSelector.choose(state)
+        self.assertEqual(attribute, "material")
+
+    def test_sparse_facet_does_not_overstate_information_gain(self) -> None:
+        candidates = [
+            *("cotton shoe" for _ in range(5)),
+            *("leather shoe" for _ in range(3)),
+            "red leather shoe",
+            "blue leather shoe",
+        ]
+        state = {
+            "slots": [],
+            "asked": {"other", "feature"},
+            "long_term_profile": {"rejected_attributes": set()},
+        }
+        state["question_scores"] = NextQuestionSelector.score(candidates, state)
+        attribute, _message, _utility = NextQuestionSelector.choose(state)
+        self.assertEqual(attribute, "material")
 
 
 if __name__ == "__main__":

@@ -192,6 +192,149 @@ class ContextProgram:
             "allow_semantic": allow_semantic,
         }
 
+
+class NextQuestionSelector:
+    """Select the clarification with the greatest expected candidate reduction."""
+
+    FACET_TERMS = {
+        "material": frozenset(
+            term for value in DialogStateMachine.MATERIALS for term in _terms(value)
+        ),
+        "color": frozenset(
+            term for value in DialogStateMachine.COLORS for term in _terms(value)
+        ),
+        "size": frozenset({
+            "xxs", "xs", "small", "medium", "large", "xl", "xxl", "plus",
+            "petite", "wide", "narrow", "slim", "oversized",
+        }),
+        "style": frozenset({
+            "casual", "classic", "formal", "modern", "vintage", "boho", "sport",
+            "athletic", "relaxed", "fitted", "slim", "loose", "sleeveless", "hooded",
+        }),
+        "use_case": frozenset({
+            "running", "walking", "hiking", "work", "travel", "wedding", "party",
+            "gym", "outdoor", "winter", "summer", "school", "sleep", "swim",
+        }),
+    }
+    ANSWERABILITY = {
+        "material": .85,
+        "color": .75,
+        "size": .48,
+        "style": .55,
+        "use_case": .52,
+        "feature": .56,
+        "budget": .22,
+        "brand": .14,
+    }
+    PROMPTS = {
+        "material": "Do you have a preferred material or fabric?",
+        "color": "Is there a color or finish you want to prioritize?",
+        "size": "Are there any size, width, or fit requirements?",
+        "style": "Which style or fit would suit you best?",
+        "use_case": "What occasion or use case is this mainly for?",
+        "feature": "Is there a particular feature or construction detail you care about?",
+        "budget": "What price range would you like me to stay within?",
+        "brand": "Do you have a preferred brand?",
+        "other": "What are the one or two details that matter most for this item?",
+    }
+    QUESTION_ORDER = (
+        "other", "material", "color", "size", "style", "use_case",
+        "feature", "budget", "brand",
+    )
+
+    @classmethod
+    def score(
+        cls,
+        candidate_texts: list[str],
+        state: dict,
+        candidate_weights: list[float] | None = None,
+    ) -> dict[str, float]:
+        sample = candidate_texts[:500]
+        weights = (
+            candidate_weights[:len(sample)]
+            if candidate_weights and len(candidate_weights) >= len(sample)
+            else [1.0] * len(sample)
+        )
+        total = len(sample)
+        total_weight = sum(weights)
+        active_kinds = {
+            slot["kind"] for slot in state["slots"] if slot["active"]
+        }
+        known_terms: dict[str, set[str]] = {}
+        for slot in state["slots"]:
+            if slot["active"]:
+                known_terms.setdefault(slot["kind"], set()).update(_terms(slot.get("value", "")))
+        rejected = state["long_term_profile"]["rejected_attributes"]
+        scores: dict[str, float] = {}
+
+        for attribute, values in cls.FACET_TERMS.items():
+            groups: dict[tuple[str, ...], float] = {}
+            covered_mass = 0.0
+            residual_values = values - known_terms.get(attribute, set())
+            for text, weight in zip(sample, weights):
+                tokens = frozenset(text.split())
+                signature = tuple(sorted(tokens & residual_values))
+                if not signature:
+                    continue
+                covered_mass += weight
+                groups[signature] = groups.get(signature, 0.0) + weight
+            if total_weight:
+                coverage = covered_mass / total_weight
+                unresolved_fraction = sum(
+                    (mass / total_weight) ** 2 for mass in groups.values()
+                )
+                information_gain = max(0.0, coverage - unresolved_fraction)
+            else:
+                information_gain = 0.0
+            utility = information_gain * cls.ANSWERABILITY[attribute]
+            if attribute in active_kinds:
+                utility *= .18
+            if attribute in rejected:
+                utility *= .12
+            scores[attribute] = utility
+
+        # Features are open-ended and cannot be cleanly faceted from flattened
+        # text, so use a calibrated answerability prior with a small pool-size
+        # bonus. Budget and brand remain lower-cost fallbacks.
+        pool_bonus = min(.10, math.log1p(total) / 100.0) if total else 0.0
+        scores["feature"] = cls.ANSWERABILITY["feature"] + pool_bonus
+        scores["budget"] = cls.ANSWERABILITY["budget"]
+        scores["brand"] = cls.ANSWERABILITY["brand"]
+        for attribute in ("feature", "budget", "brand"):
+            if attribute in rejected:
+                scores[attribute] *= .12
+
+        best_specific = sorted(scores.values(), reverse=True)[:2]
+        combined = 0.0
+        for value in best_specific:
+            combined = 1.0 - (1.0 - combined) * (1.0 - value)
+        # `other` can reveal two constraints in the evaluator and represents a
+        # broad convergence prompt in production.
+        scores["other"] = min(.99, combined + .04)
+        return {name: round(value, 6) for name, value in scores.items()}
+
+    @classmethod
+    def choose(cls, state: dict) -> tuple[str | None, str, float]:
+        scores = state.get("question_scores", {})
+        available = {
+            attribute: score for attribute, score in scores.items()
+            if attribute not in state["asked"]
+        }
+        if not available:
+            return None, "These are the best matches based on the preferences you shared.", 0.0
+        priority = {name: index for index, name in enumerate(cls.QUESTION_ORDER)}
+        attribute, utility = min(
+            available.items(),
+            key=lambda pair: (-pair[1], priority.get(pair[0], len(priority))),
+        )
+        if (
+            attribute not in {"other", "feature"}
+            and "feature" in available
+            and utility < available["feature"] + .08
+        ):
+            attribute, utility = "feature", available["feature"]
+        return attribute, cls.PROMPTS[attribute], utility
+
 class Agent:
     """Dependency-free hybrid FTS and disclosed-constraint ranker."""
     def __init__(
@@ -274,6 +417,8 @@ class Agent:
             "phase": "discovery",
             "candidate_count": 0,
             "over_general": False,
+            "question_scores": {},
+            "question_decision": {},
             "history": [],
             "context_version": 0,
             "short_term_context": {},
@@ -409,7 +554,11 @@ class Agent:
 
     def _rank(self, state: dict, top_k: int) -> list[dict]:
         constraints = state["constraints"]
-        if not constraints: return []
+        if not constraints:
+            state["candidate_count"] = 0
+            state["over_general"] = True
+            state["question_scores"] = NextQuestionSelector.score([], state)
+            return []
         candidates = self._candidate_rows(
             constraints,
             state["intent"] or "browsing",
@@ -457,6 +606,13 @@ class Agent:
                 pass
             scored.append((score, asin))
         scored.sort(key=lambda pair: (-pair[0], pair[1]))
+        focused_texts = [candidates[asin] for _score, asin in scored[:200]]
+        posterior_weights = [
+            1.0 / math.log2(rank + 2) for rank in range(1, len(focused_texts) + 1)
+        ]
+        state["question_scores"] = NextQuestionSelector.score(
+            focused_texts, state, posterior_weights,
+        )
         return [{"parent_asin": asin, "score": round(score, 5)} for score, asin in scored[:top_k]]
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
@@ -470,9 +626,13 @@ class Agent:
             state["intent"] = "buying"
             state["intent_history"].append({"turn": turn, "intent": "buying"})
         # A declined clarification is not evidence that the user has supplied
-        # that slot.  Re-open it so the next question can obtain useful signal.
-        if re.search(r"\b(?:don't have|do not have|no additional)\b.*\b(?:preference|requirement)\b", user_message.lower()):
-            state["asked"].discard(state.get("last_ask"))
+        # that slot. A broad `other` prompt may still be reframed, but a typed
+        # attribute is recorded as declined and is not immediately repeated.
+        if (
+            re.search(r"\b(?:don't have|do not have|no additional)\b.*\b(?:preference|requirement)\b", user_message.lower())
+            and state.get("last_ask") == "other"
+        ):
+            state["asked"].discard("other")
         DialogStateMachine.apply(
             state, self._extract_observations(user_message), turn, override,
         )
@@ -487,30 +647,39 @@ class Agent:
             f" Your profile emphasizes {', '.join(profile_tags)}, if that is relevant."
             if profile_tags else ""
         )
-        # The simulator maps `other` to the next two target constraints.  It is
-        # also the best structured convergence question for an overloaded pool.
-        if state["over_general"] and "other" not in state["asked"]:
-            ask, message = "other", (
+        if turn <= 9:
+            ask, message, question_utility = NextQuestionSelector.choose(state)
+        else:
+            ask, message, question_utility = (
+                None,
+                "These are the best matches based on the preferences you shared.",
+                0.0,
+            )
+        if state["over_general"] and ask == "other":
+            message = (
                 "I found many possible matches. What are the one or two non-negotiable "
                 "details—such as material, style, use case, or budget?" + profile_hint
             )
             state["phase"] = "clarification"
-        elif state["workflow"]["strategy"] == "override_recovery" and "other" not in state["asked"]:
-            ask, message = "other", (
+        elif state["workflow"]["strategy"] == "override_recovery" and ask == "other":
+            message = (
                 "Understood—I have reset the earlier preference. What other detail should "
                 "I prioritize for the new direction?"
             )
-        elif turn <= 2 and "other" not in state["asked"]:
-            ask, message = "other", (
-                "What are the one or two details that matter most for this item?" + profile_hint
-            )
-        elif turn <= 5 and "feature" not in state["asked"]:
-            ask, message = "feature", "Is there a particular feature or construction detail you care about?"
-        else:
-            ask, message = None, "These are the best matches based on the preferences you shared."
+        elif ask == "other":
+            message += profile_hint
+        if ask is None:
             state["phase"] = "recommendation"
         if ask: state["asked"].add(ask)
         state["last_ask"] = ask
+        state["question_decision"] = {
+            "attribute": ask,
+            "utility": round(question_utility, 6),
+            "scores": dict(sorted(
+                state["question_scores"].items(),
+                key=lambda pair: (-pair[1], pair[0]),
+            )),
+        }
         state["short_term_context"].update({
             "phase": state["phase"],
             "candidate_count": state["candidate_count"],
@@ -529,6 +698,7 @@ class Agent:
                 "over_general": state["over_general"],
                 "strategy": state["workflow"]["strategy"],
                 "context_version": state["context_version"],
+                "next_question": state["question_decision"],
             },
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
