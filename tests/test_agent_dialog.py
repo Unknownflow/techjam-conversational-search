@@ -31,7 +31,12 @@ class AgentDialogTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             agent = self._agent(Path(directory))
             agent.reset("s", {"preference_tags": []})
-            agent.respond("s", "I'm looking for Shoes. I prefer leather.", 1, 10)
+            first = agent.respond("s", "I'm looking for Shoes. I prefer leather.", 1, 10)
+            self.assertEqual(
+                agent.sessions["s"]["long_term_profile"]["learned_preferences"],
+                {"material": ["leather"]},
+            )
+            self.assertEqual(first["dialog_state"]["context_version"], 1)
             response = agent.respond(
                 "s",
                 "Actually, ignore my earlier preference. What I need is: cotton.",
@@ -42,8 +47,12 @@ class AgentDialogTest(unittest.TestCase):
             self.assertIn("shoes", active)
             self.assertIn("cotton", active)
             self.assertNotIn("leather", active)
+            self.assertEqual(
+                agent.sessions["s"]["long_term_profile"]["learned_preferences"], {}
+            )
             self.assertEqual(response["dialog_state"]["intent"], "buying")
             self.assertEqual(response["dialog_state"]["phase"], "intent_override")
+            self.assertEqual(response["dialog_state"]["strategy"], "override_recovery")
 
     def test_over_general_pool_triggers_structured_clarification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -54,6 +63,19 @@ class AgentDialogTest(unittest.TestCase):
             self.assertEqual(response["ask_attribute"], "other")
             self.assertTrue(response["dialog_state"]["over_general"])
             self.assertEqual(response["dialog_state"]["phase"], "clarification")
+            self.assertEqual(response["dialog_state"]["strategy"], "clarify_overload")
+
+    def test_context_history_is_distilled_to_a_bounded_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._agent(Path(directory))
+            agent.reset("s", {"preference_tags": ["fit", "comfort"]})
+            for turn in range(1, 9):
+                agent.respond("s", "I prefer leather.", turn, 10)
+            state = agent.sessions["s"]
+            self.assertEqual(len(state["history"]), 6)
+            self.assertEqual(state["context_version"], 8)
+            self.assertEqual(state["long_term_profile"]["base_tags"], ["fit", "comfort"])
+            self.assertIn("leather", state["profile_terms"])
 
 
 if __name__ == "__main__":

@@ -103,6 +103,74 @@ class DialogStateMachine:
             "refinement" if len(state["constraints"]) > 1 else "discovery"
         )
 
+
+class ContextProgram:
+    """Distill dialog memory and select the next runtime workflow."""
+
+    HISTORY_LIMIT = 6
+
+    @classmethod
+    def distill(cls, state: dict, user_message: str, turn: int) -> None:
+        state["history"].append({"turn": turn, "role": "user", "text": user_message[:500]})
+        del state["history"][:-cls.HISTORY_LIMIT]
+
+        declined = bool(re.search(
+            r"\b(?:don't have|do not have|no additional)\b.*\b(?:preference|requirement)\b",
+            user_message,
+            re.I,
+        ))
+        if declined and state.get("last_ask"):
+            state["long_term_profile"]["rejected_attributes"].add(state["last_ask"])
+
+        active_by_kind: dict[str, list[str]] = {}
+        learned: dict[str, list[str]] = {}
+        for slot in state["slots"]:
+            if not slot["active"]:
+                continue
+            active_by_kind.setdefault(slot["kind"], []).append(slot["value"])
+            if slot["source"] == "preference":
+                learned.setdefault(slot["kind"], []).append(slot["value"])
+        # Recompute rather than append forever, so overridden preferences are
+        # also removed from the distilled profile.
+        state["long_term_profile"]["learned_preferences"] = learned
+        learned_terms = _terms(" ".join(
+            value for values in learned.values() for value in values
+        ))
+        state["profile_terms"] = list(dict.fromkeys(
+            [*state["long_term_profile"]["base_tags"], *learned_terms]
+        ))
+        state["context_version"] += 1
+        state["short_term_context"] = {
+            "version": state["context_version"],
+            "intent": state["intent"],
+            "phase": state["phase"],
+            "active_slots": active_by_kind,
+            "recent_turns": list(state["history"]),
+            "turns_remaining": max(0, 10 - turn),
+            "declined_last_attribute": declined,
+        }
+
+    @staticmethod
+    def orchestrate(state: dict) -> None:
+        """Re-program the next retrieval and guidance workflow from context."""
+        slot_count = len(state["constraints"])
+        candidate_count = state["candidate_count"]
+        if state["phase"] == "intent_override":
+            strategy, allow_dense, allow_semantic = "override_recovery", False, True
+        elif state["over_general"]:
+            strategy, allow_dense, allow_semantic = "clarify_overload", False, False
+        elif state["intent"] == "buying":
+            strategy, allow_dense, allow_semantic = "precision_filter", False, True
+        elif slot_count >= 3 or (candidate_count and candidate_count <= 40):
+            strategy, allow_dense, allow_semantic = "focused_rerank", False, True
+        else:
+            strategy, allow_dense, allow_semantic = "discovery_expand", True, True
+        state["workflow"] = {
+            "strategy": strategy,
+            "allow_dense": allow_dense,
+            "allow_semantic": allow_semantic,
+        }
+
 class Agent:
     """Dependency-free hybrid FTS and disclosed-constraint ranker."""
     def __init__(
@@ -176,6 +244,7 @@ class Agent:
             self.dense_matrix = np.vstack(dense_rows)
 
     def reset(self, session_id: str, user_profile: dict) -> None:
+        base_tags = _terms(" ".join(str(x) for x in user_profile.get("preference_tags", [])))
         self.sessions[session_id] = {
             "constraints": [],
             "slots": [],
@@ -184,7 +253,22 @@ class Agent:
             "phase": "discovery",
             "candidate_count": 0,
             "over_general": False,
-            "profile_terms": _terms(" ".join(str(x) for x in user_profile.get("preference_tags", []))),
+            "history": [],
+            "context_version": 0,
+            "short_term_context": {},
+            "long_term_profile": {
+                "base_tags": list(dict.fromkeys(base_tags)),
+                "rating_style": str(user_profile.get("rating_style") or ""),
+                "purchase_frequency": str(user_profile.get("purchase_frequency") or ""),
+                "learned_preferences": {},
+                "rejected_attributes": set(),
+            },
+            "workflow": {
+                "strategy": "discovery_expand",
+                "allow_dense": True,
+                "allow_semantic": True,
+            },
+            "profile_terms": base_tags,
             "asked": set(),
         }
 
@@ -241,7 +325,9 @@ class Agent:
             rowids,
         ).fetchall()
 
-    def _candidate_rows(self, constraints: list[str], intent: str) -> dict[str, str]:
+    def _candidate_rows(
+        self, constraints: list[str], intent: str, allow_dense: bool = True,
+    ) -> dict[str, str]:
         """Retrieve only a bounded working set; catalog text remains in SQLite."""
         candidates: dict[str, str] = {}
         def add_rows(rows: list[tuple]) -> None:
@@ -296,20 +382,28 @@ class Agent:
         # Browsing favors a second, diverse discovery route only when lexical
         # evidence is thin.  Otherwise a broad vector route can dilute a
         # high-confidence category match with merely similar catalog entries.
-        if intent == "browsing" and len(candidates) < 80:
+        if intent == "browsing" and allow_dense and len(candidates) < 80:
             add_rows(self._dense_rows(" ".join(constraints)))
         return candidates
 
     def _rank(self, state: dict, top_k: int) -> list[dict]:
         constraints = state["constraints"]
         if not constraints: return []
-        candidates = self._candidate_rows(constraints, state["intent"] or "browsing")
+        candidates = self._candidate_rows(
+            constraints,
+            state["intent"] or "browsing",
+            bool(state["workflow"].get("allow_dense", True)),
+        )
         state["candidate_count"] = len(candidates)
         state["over_general"] = (
             len(constraints) <= 1 and len(candidates) >= OVERGENERALITY_THRESHOLD
         )
         semantic_scores: Mapping[str, float] = {}
-        if self.semantic_reranker is not None and not state["over_general"]:
+        if (
+            self.semantic_reranker is not None
+            and not state["over_general"]
+            and state["workflow"].get("allow_semantic", True)
+        ):
             # An external local/API LLM reranker is optional.  A failure must
             # never interrupt the deterministic ranking fallback.
             try:
@@ -361,17 +455,34 @@ class Agent:
         DialogStateMachine.apply(
             state, self._extract_observations(user_message), turn, override,
         )
+        if override:
+            # Re-open the broad clarification route after a workflow reset.
+            state["asked"].discard("other")
+        ContextProgram.distill(state, user_message, turn)
         recommendations = self._rank(state, top_k)
+        ContextProgram.orchestrate(state)
+        profile_tags = state["long_term_profile"]["base_tags"][:2]
+        profile_hint = (
+            f" Your profile emphasizes {', '.join(profile_tags)}, if that is relevant."
+            if profile_tags else ""
+        )
         # The simulator maps `other` to the next two target constraints.  It is
         # also the best structured convergence question for an overloaded pool.
         if state["over_general"] and "other" not in state["asked"]:
             ask, message = "other", (
                 "I found many possible matches. What are the one or two non-negotiable "
-                "details—such as material, style, use case, or budget?"
+                "details—such as material, style, use case, or budget?" + profile_hint
             )
             state["phase"] = "clarification"
+        elif state["workflow"]["strategy"] == "override_recovery" and "other" not in state["asked"]:
+            ask, message = "other", (
+                "Understood—I have reset the earlier preference. What other detail should "
+                "I prioritize for the new direction?"
+            )
         elif turn <= 2 and "other" not in state["asked"]:
-            ask, message = "other", "What are the one or two details that matter most for this item?"
+            ask, message = "other", (
+                "What are the one or two details that matter most for this item?" + profile_hint
+            )
         elif turn <= 5 and "feature" not in state["asked"]:
             ask, message = "feature", "Is there a particular feature or construction detail you care about?"
         else:
@@ -379,6 +490,12 @@ class Agent:
             state["phase"] = "recommendation"
         if ask: state["asked"].add(ask)
         state["last_ask"] = ask
+        state["short_term_context"].update({
+            "phase": state["phase"],
+            "candidate_count": state["candidate_count"],
+            "over_general": state["over_general"],
+            "strategy": state["workflow"]["strategy"],
+        })
         return {
             "message": message,
             "ask_attribute": ask,
@@ -389,6 +506,8 @@ class Agent:
                 "active_slots": len(state["constraints"]),
                 "candidate_count": state["candidate_count"],
                 "over_general": state["over_general"],
+                "strategy": state["workflow"]["strategy"],
+                "context_version": state["context_version"],
             },
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }

@@ -88,6 +88,27 @@ Many catalog products are indistinguishable from the available conversational co
 
 This is a commercial retrieval consideration rather than a label-derived shortcut. It is applicable to the private split because it uses no public-session identifiers, targets, or hidden intent cards. The prior is small enough to resolve similarly matched products rather than override a material user requirement.
 
+### 7. Dynamic context programming and self-adaptation
+
+Every user turn is distilled into two memory layers:
+
+- **Short-term context**: a versioned summary containing the current intent, dialog phase, active slots grouped by type, the six most recent user turns, remaining turn budget, candidate count, overload status, and selected strategy.
+- **Personalized profile context**: the aggregate profile tags supplied at reset, rating style, purchase frequency, explicitly learned preferences, and attributes the customer declined to specify.
+
+The history window is bounded to avoid unbounded prompt/state growth. Learned preferences are recomputed from active preference slots on every turn, so an intent override removes superseded preferences from both dialog state and personalized ranking context. Base profile tags remain weak tie-breakers; they do not override explicit current-session requirements.
+
+The context program selects one of five workflows after each retrieval:
+
+| Strategy | Condition | Next-turn orchestration |
+| --- | --- | --- |
+| `discovery_expand` | Browsing with limited accumulated evidence | Permit dense discovery and semantic reranking. |
+| `clarify_overload` | One or fewer constraints with a large candidate pool | Disable dense/LLM expansion and ask for non-negotiable details. |
+| `precision_filter` | Buying intent | Disable broad dense retrieval and lock explicit constraints. |
+| `focused_rerank` | Three or more slots, or a small candidate set | Stop expansion and concentrate on reranking. |
+| `override_recovery` | Abrupt intent replacement | Preserve category and hard evidence, retire soft preferences, reopen clarification, and rerank for the new direction. |
+
+This is runtime workflow re-orchestration rather than static prompt selection: the strategy controls whether dense retrieval and optional semantic reranking are permitted on the following turn, and it changes the guidance message. Profile tags are surfaced as optional guidance hints when asking broad clarification questions.
+
 ## Evaluation Findings and Changes
 
 The initial implementation achieved the following full public-set result:
@@ -156,6 +177,7 @@ The changes were selected to improve behavior on the task class, rather than exp
 - The system uses only information available at inference: catalog metadata, the user profile, and the current conversation.
 - The precision route has recall fallbacks, which is safer if private messages include paraphrasing or incomplete attributes.
 - Product quality is catalog-derived and smoothed, so it is a tie-breaker rather than a target memorization mechanism.
+- Learned profile values are derived only from explicit active preference slots and are removed when those slots are overridden.
 - The agent remains dependency-free, deterministic, and fully in-memory, making it appropriate for constrained offline evaluation.
 
 ## Verification
@@ -163,7 +185,7 @@ The changes were selected to improve behavior on the task class, rather than exp
 The repository evaluator and dialog-state tests were executed successfully:
 
 ```text
-Ran 5 tests ... OK
+Ran 6 tests ... OK
 ```
 
 The improved result above was produced by running the complete public evaluator over all 200 sessions, not a small sample.
@@ -175,3 +197,5 @@ The improved result above was produced by running the complete public evaluator 
 - The current quality prior does not account for price compatibility unless price is explicitly disclosed. A structured budget scorer would improve that case.
 - Override erasure is intentionally conservative: it retires tracked soft preferences and rewritten override slots, but does not infer that unrelated hard constraints should be discarded unless the user explicitly identifies them.
 - The over-generality threshold is catalog-size dependent. A production system should calibrate it from retrieval latency, candidate entropy, and observed conversion behavior rather than a fixed count alone.
+- The dataset supplies no stable user identifier and explicitly isolates sessions. Accordingly, learned “long-term” preferences are retained only inside the current session; cross-session persistence would require an authorized identity, consent, retention policy, and profile store.
+- Workflow selection is currently rule-based. Online contextual-bandit learning could optimize question value and route selection in production, but would require unbiased conversion feedback and safeguards against self-reinforcing popularity bias.
