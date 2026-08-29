@@ -44,18 +44,27 @@ If a restrictive individual query has no results, it falls back to an OR query o
 
 Each session stores:
 
-- disclosed category and preference constraints;
+- typed slot records containing value, source, turn, and active/retired status;
+- the current intent and intent-change history;
+- the dialog phase (`discovery`, `refinement`, `clarification`, `intent_override`, or `recommendation`);
+- the latest candidate count and over-generality decision;
 - profile preference tags;
 - questions already asked; and
 - the most recent requested attribute.
 
 The extraction logic preserves both category and hard requirement in a Buying request. This is important because a common requirement such as `leather` alone is too broad; `wallets + leather` is a substantially better retrieval signal.
 
-The state is additive for normal information accumulation. When a user declines a requested attribute (for example, “I don't have a preference”), that attribute is made eligible again rather than being treated as useful information. This lets the agent continue the dialogue without wasting the remainder of the ten-turn budget.
+Normal turns accumulate category, material, color, size, budget, use-case, style, and feature slots. The state machine deduplicates repeated values while preserving multiple independently confirmed hard constraints.
+
+An explicit phrase such as “Actually, ignore my earlier preference. What I need is…” causes an intent transition to Buying. Prior soft-preference slots are retired, a previous override of the same slot type can be rewritten, and the category plus unrelated confirmed hard constraints remain active. This selective erasure avoids both stale-preference contamination and destructive loss of useful evidence.
+
+When a user declines a requested attribute (for example, “I don't have a preference”), that attribute is made eligible again rather than being treated as useful information. This lets the agent continue the dialogue without wasting the remainder of the ten-turn budget. Responses include a compact `dialog_state` object for observability; the evaluator ignores this optional metadata.
 
 ### 4. High-information clarification policy
 
 The agent first requests `other`, which permits the simulator to disclose the next most useful one or two constraints. This is followed by a feature/construction question if more information is needed. A no-preference response reopens the question so a subsequent clarification can still collect signal.
+
+Over-generality is detected when a request has at most one active constraint and lexical retrieval reaches the configured candidate-pool threshold. The dialog immediately enters `clarification` and asks for one or two non-negotiable details, with examples covering material, style, use case, and budget. The optional dense/LLM stage is cut off for that turn because broad semantic expansion would add noise. A grounded lexical shortlist is still returned, preserving the opportunity for an early conversion while the clarification guides the next turn.
 
 This policy is deliberately compact: the system retrieves after every customer message and asks only when additional information is likely to reduce ambiguity. That directly supports Mean Turns to Conversion.
 
@@ -151,17 +160,18 @@ The changes were selected to improve behavior on the task class, rather than exp
 
 ## Verification
 
-The repository evaluator tests were executed successfully:
+The repository evaluator and dialog-state tests were executed successfully:
 
 ```text
-Ran 3 tests ... OK
+Ran 5 tests ... OK
 ```
 
 The improved result above was produced by running the complete public evaluator over all 200 sessions, not a small sample.
 
 ## Limitations and Future Work
 
-- Lexical FTS does not understand true semantic equivalence. If allowed by runtime constraints, a compact local embedding model could add a third dense-retrieval route.
-- Constraint extraction is intentionally simple and benefits from the controlled input format. More natural production dialogue would benefit from a robust slot parser.
+- The built-in dense route is a deterministic feature-hashed embedding, not a pretrained semantic model. The optional LLM reranker hook requires a separately configured model, credentials, latency budget, and token reporting.
+- Constraint extraction is rule-based and benefits from the controlled input format. Negation, comparative preferences, nested conditions, and long free-form dialogue would benefit from a schema-constrained model parser.
 - The current quality prior does not account for price compatibility unless price is explicitly disclosed. A structured budget scorer would improve that case.
-- Intent overrides are represented by fresh user constraints; a production version should additionally attach provenance to each slot and explicitly retire superseded values.
+- Override erasure is intentionally conservative: it retires tracked soft preferences and rewritten override slots, but does not infer that unrelated hard constraints should be discarded unless the user explicitly identifies them.
+- The over-generality threshold is catalog-size dependent. A production system should calibrate it from retrieval latency, candidate entropy, and observed conversion behavior rather than a fixed count alone.

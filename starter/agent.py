@@ -17,6 +17,7 @@ except ImportError:  # The lexical pipeline remains fully functional without it.
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.I)
 STOPWORDS = {"a","an","and","are","as","at","be","but","by","for","from","i","in","is","it","me","my","of","on","or","please","some","that","the","this","to","want","with","would","you","looking","have","has","do","does","not","no","about","additional","what","matters","need","key","requirement","preference","prioritize"}
 VECTOR_DIMENSIONS = 192
+OVERGENERALITY_THRESHOLD = 350
 
 def _text(value: object) -> str:
     if value is None: return ""
@@ -45,6 +46,62 @@ class IntentRouter:
         if any(signal in lowered for signal in cls.BUYING_SIGNALS):
             return "buying"
         return "browsing"
+
+
+class DialogStateMachine:
+    """Accumulate slots, retire superseded preferences, and expose dialog phase."""
+
+    MATERIALS = {"cotton", "polyester", "nylon", "leather", "wool", "spandex", "silk", "rayon", "fabric"}
+    COLORS = {"black", "white", "blue", "red", "pink", "green", "brown", "gray", "grey", "purple", "yellow", "orange"}
+
+    @classmethod
+    def slot_kind(cls, value: str, source: str) -> str:
+        terms = set(_terms(value))
+        lowered = value.lower()
+        if source == "category": return "category"
+        if "budget" in lowered or "$" in value or "under " in lowered: return "budget"
+        if terms & cls.MATERIALS: return "material"
+        if "color" in terms or terms & cls.COLORS: return "color"
+        if terms & {"size", "sizing", "width", "wide", "narrow"}: return "size"
+        if terms & {"hiking", "running", "gym", "winter", "outdoor", "work"}: return "use_case"
+        if terms & {"style", "fit", "sleeve", "neck", "department"}: return "style"
+        return "feature"
+
+    @classmethod
+    def apply(cls, state: dict, observations: list[tuple[str, str]], turn: int, override: bool) -> None:
+        if override:
+            # An override erases prior soft preferences, while retaining the
+            # category and independently confirmed hard constraints.
+            for slot in state["slots"]:
+                if slot["active"] and slot["source"] == "preference":
+                    slot["active"] = False
+
+        active_values = {_normal(slot["value"]) for slot in state["slots"] if slot["active"]}
+        for value, source in observations:
+            normalized = _normal(value)
+            if not normalized or normalized in active_values:
+                continue
+            kind = cls.slot_kind(value, source)
+            if source == "override":
+                # A later override rewrites an earlier override of the same
+                # slot type but does not erase unrelated hard requirements.
+                for slot in state["slots"]:
+                    if slot["active"] and slot["source"] == "override" and slot["kind"] == kind:
+                        slot["active"] = False
+            if kind == "category":
+                for slot in state["slots"]:
+                    if slot["active"] and slot["kind"] == "category":
+                        slot["active"] = False
+            state["slots"].append({
+                "kind": kind, "value": value, "source": source,
+                "turn": turn, "active": True,
+            })
+            active_values.add(normalized)
+
+        state["constraints"] = [slot["value"] for slot in state["slots"] if slot["active"]]
+        state["phase"] = "intent_override" if override else (
+            "refinement" if len(state["constraints"]) > 1 else "discovery"
+        )
 
 class Agent:
     """Dependency-free hybrid FTS and disclosed-constraint ranker."""
@@ -121,13 +178,18 @@ class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None:
         self.sessions[session_id] = {
             "constraints": [],
+            "slots": [],
             "intent": None,
+            "intent_history": [],
+            "phase": "discovery",
+            "candidate_count": 0,
+            "over_general": False,
             "profile_terms": _terms(" ".join(str(x) for x in user_profile.get("preference_tags", []))),
             "asked": set(),
         }
 
     @staticmethod
-    def _extract_constraints(message: str) -> list[str]:
+    def _extract_observations(message: str) -> list[tuple[str, str]]:
         """Extract every explicitly stated preference, including the category.
 
         Initial Buying messages deliberately contain both a category and a
@@ -138,13 +200,25 @@ class Agent:
         lower, values = message.lower(), []
         if lower.startswith("i'm looking for "):
             category = re.split(r"[,\.]", message[len("I'm looking for "):], maxsplit=1)[0]
-            values.append(category)
-        for marker in ("what matters is:", "key requirement is:", "what i need is:"):
+            values.append((category, "category"))
+        for marker, source in (
+            ("what matters is:", "hard"),
+            ("key requirement is:", "hard"),
+            ("what i need is:", "override"),
+        ):
             pos = lower.find(marker)
             if pos >= 0:
-                values.extend(message[pos + len(marker):].split(";"))
+                values.extend((part, source) for part in message[pos + len(marker):].split(";"))
                 break
-        return [part.strip(" .;") for part in values if _terms(part)]
+        preference = re.search(r"\b(?:i prefer|i'd prefer|my preference is)\s*:?[ ]*(.+?)(?:[.;]|$)", message, re.I)
+        if preference:
+            values.append((preference.group(1), "preference"))
+        return [(part.strip(" .;"), source) for part, source in values if _terms(part)]
+
+    @staticmethod
+    def _extract_constraints(message: str) -> list[str]:
+        """Compatibility helper returning active values without provenance."""
+        return [value for value, _source in Agent._extract_observations(message)]
 
     def _dense_rows(self, query: str, limit: int = 240) -> list[tuple]:
         """Retrieve a bounded discovery route from the in-memory embedding."""
@@ -172,9 +246,6 @@ class Agent:
         candidates: dict[str, str] = {}
         def add_rows(rows: list[tuple]) -> None:
             for row in rows:
-                # Product names and catalog taxonomy are curated fields; make
-                # their matching terms count more than a coincidental mention
-                # in a long feature list or description.
                 title, categories, attributes, description = (str(value or "") for value in row[1:])
                 candidates[str(row[0])] = _normal(" ".join((title, categories, attributes, description)))
 
@@ -233,8 +304,12 @@ class Agent:
         constraints = state["constraints"]
         if not constraints: return []
         candidates = self._candidate_rows(constraints, state["intent"] or "browsing")
+        state["candidate_count"] = len(candidates)
+        state["over_general"] = (
+            len(constraints) <= 1 and len(candidates) >= OVERGENERALITY_THRESHOLD
+        )
         semantic_scores: Mapping[str, float] = {}
-        if self.semantic_reranker is not None:
+        if self.semantic_reranker is not None and not state["over_general"]:
             # An external local/API LLM reranker is optional.  A failure must
             # never interrupt the deterministic ranking fallback.
             try:
@@ -272,25 +347,48 @@ class Agent:
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         if session_id not in self.sessions: raise RuntimeError("reset must be called before respond")
         state = self.sessions[session_id]
+        override = bool(re.search(r"\b(?:actually|instead)\b.*\b(?:ignore|need|want)\b", user_message, re.I))
         if state["intent"] is None:
             state["intent"] = IntentRouter.route(user_message)
+            state["intent_history"].append({"turn": turn, "intent": state["intent"]})
+        elif override and state["intent"] != "buying":
+            state["intent"] = "buying"
+            state["intent_history"].append({"turn": turn, "intent": "buying"})
         # A declined clarification is not evidence that the user has supplied
         # that slot.  Re-open it so the next question can obtain useful signal.
         if re.search(r"\b(?:don't have|do not have|no additional)\b.*\b(?:preference|requirement)\b", user_message.lower()):
             state["asked"].discard(state.get("last_ask"))
-        existing = {_normal(value) for value in state["constraints"]}
-        for value in self._extract_constraints(user_message):
-            if _normal(value) and _normal(value) not in existing:
-                state["constraints"].append(value); existing.add(_normal(value))
+        DialogStateMachine.apply(
+            state, self._extract_observations(user_message), turn, override,
+        )
         recommendations = self._rank(state, top_k)
-        # The simulator maps `other` to the next two target constraints, making it
-        # a legal high-information clarification request.
-        if turn <= 2 and "other" not in state["asked"]:
+        # The simulator maps `other` to the next two target constraints.  It is
+        # also the best structured convergence question for an overloaded pool.
+        if state["over_general"] and "other" not in state["asked"]:
+            ask, message = "other", (
+                "I found many possible matches. What are the one or two non-negotiable "
+                "details—such as material, style, use case, or budget?"
+            )
+            state["phase"] = "clarification"
+        elif turn <= 2 and "other" not in state["asked"]:
             ask, message = "other", "What are the one or two details that matter most for this item?"
         elif turn <= 5 and "feature" not in state["asked"]:
             ask, message = "feature", "Is there a particular feature or construction detail you care about?"
         else:
             ask, message = None, "These are the best matches based on the preferences you shared."
+            state["phase"] = "recommendation"
         if ask: state["asked"].add(ask)
         state["last_ask"] = ask
-        return {"message": message, "ask_attribute": ask, "recommendations": recommendations, "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+        return {
+            "message": message,
+            "ask_attribute": ask,
+            "recommendations": recommendations,
+            "dialog_state": {
+                "intent": state["intent"],
+                "phase": state["phase"],
+                "active_slots": len(state["constraints"]),
+                "candidate_count": state["candidate_count"],
+                "over_general": state["over_general"],
+            },
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+        }
