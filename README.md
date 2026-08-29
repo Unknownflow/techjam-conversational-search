@@ -43,6 +43,26 @@ python3 -m evaluator.local_evaluator
 Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
 The command writes per-session results and aggregate metrics to `results.json`.
 
+## Current Public Benchmark
+
+The following values are taken from the current `results.json` run over all 200 public sessions. Re-run the evaluator after a change and update this table only when the complete run improves or validates the result.
+
+| Metric | Current value | Why it matters |
+| --- | ---: | --- |
+| Technical score | **0.884566** | Weighted objective: Hit Rate@10, MRR, and efficiency. |
+| Hit Rate@10 | **0.995000** | Target appears in the top ten recommendations. |
+| MRR | **0.670552** | Target is placed near the top of the list. |
+| MTTC | **1.705** | Fewer turns to first successful recommendation is better. |
+| Efficiency | **0.929500** | Turn-efficiency component of the score. |
+| Prompt / completion tokens | **0 / 0** | Default offline path uses no external model tokens. |
+
+| Scenario | Sessions | Hit Rate@10 | MRR | MTTC |
+| --- | ---: | ---: | ---: | ---: |
+| Buying | 80 | 0.987500 | 0.641066 | 1.225 |
+| Browsing | 80 | 1.000000 | 0.633289 | 1.463 |
+| Intent Override | 30 | 1.000000 | 0.827302 | 3.600 |
+| Boundary | 10 | 1.000000 | 0.734286 | 1.800 |
+
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
 

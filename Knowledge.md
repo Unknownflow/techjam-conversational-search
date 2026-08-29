@@ -111,6 +111,28 @@ This is runtime workflow re-orchestration rather than static prompt selection: t
 
 ## Evaluation Findings and Changes
 
+### Current benchmark dashboard
+
+The current `results.json` is the complete 200-session public evaluation. These are the primary metrics to track after every substantive agent change.
+
+| Metric | Current value | Target direction |
+| --- | ---: | --- |
+| Technical score | **0.884566** | Higher |
+| Hit Rate@10 | **0.995000** | Higher |
+| MRR | **0.670552** | Higher |
+| MTTC | **1.705** | Lower |
+| Efficiency | **0.929500** | Higher |
+| Reported model tokens | **0** | Keep within deployment budget |
+
+| Scenario | Sessions | Hit Rate@10 | MRR | MTTC |
+| --- | ---: | ---: | ---: | ---: |
+| Buying | 80 | 0.987500 | 0.641066 | 1.225 |
+| Browsing | 80 | 1.000000 | 0.633289 | 1.463 |
+| Intent Override | 30 | 1.000000 | 0.827302 | 3.600 |
+| Boundary | 10 | 1.000000 | 0.734286 | 1.800 |
+
+The scenario table is especially useful for regression diagnosis: a higher aggregate score should not conceal a collapse in Buying precision or Intent Override recovery.
+
 The initial implementation achieved the following full public-set result:
 
 ```json
