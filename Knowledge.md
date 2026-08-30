@@ -154,21 +154,6 @@ The current `results.json` is the complete 200-session public evaluation. These 
 
 The scenario table is especially useful for regression diagnosis: a higher aggregate score should not conceal a collapse in Buying precision or Intent Override recovery.
 
-The selected policy also improves every aggregate metric on the separate local
-1,000-session holdout:
-
-| Metric | Previous | Current | Change |
-| --- | ---: | ---: | ---: |
-| Technical score | 0.886401 | 0.901640 | +0.015239 |
-| Hit Rate@10 | 0.948000 | 0.950000 | +0.002000 |
-| MRR | 0.855135 | 0.885065 | +0.029930 |
-| MTTC | 3.207 | 2.944 | -0.263 turns |
-| Efficiency | 0.779300 | 0.805600 | +0.026300 |
-
-This holdout agreement is important: it shows the public gain is not merely a
-reordering of the 200 development targets. `results_holdout_final.json` contains
-the complete zero-token result, while `data/test_set.jsonl` is kept out of Git.
-
 The initial implementation achieved the following full public-set result:
 
 ```json
@@ -268,8 +253,7 @@ Ran 17 tests ... OK
 ```
 
 The improved result above was produced by running the complete public evaluator
-over all 200 sessions, not a small sample. The same source was then evaluated
-unchanged on all 1,000 holdout sessions.
+over all 200 released sessions, not a small sample.
 
 ## Limitations and Future Work
 

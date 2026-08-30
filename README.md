@@ -34,7 +34,9 @@ Verify the downloaded file using the published `SHA256SUMS` file.
 
 ## Run the Starter
 
-Python 3.10 or later is recommended. The starter uses only the Python standard library.
+The frozen submission uses CPython 3.12.13 and NumPy 2.3.5. Install its pinned
+dependency and consult `submission/README.md` for the exact environment,
+official entry point, performance disclosures, limitations, and archive command.
 
 ```bash
 python3 -m evaluator.local_evaluator
@@ -62,12 +64,6 @@ The following values are taken from the current `results.json` run over all 200 
 | Browsing | 80 | 1.000000 | 0.956250 | 1.925 |
 | Intent Override | 30 | 1.000000 | 0.975000 | 3.733 |
 | Boundary | 10 | 1.000000 | 0.910000 | 2.600 |
-
-The same implementation was also evaluated on the local 1,000-session holdout.
-Its score improved from `0.886401` to `0.901640`: Hit Rate rose from `0.948`
-to `0.950`, MRR from `0.855135` to `0.885065`, and MTTC fell from `3.207`
-to `2.944`. The complete final holdout output is stored in
-`results/main/results_holdout_final.json`; the dataset itself is ignored by Git.
 
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
@@ -142,6 +138,7 @@ evaluator/local_evaluator.py      public-set simulator and scorer
 ## Judging and Submission Policy
 
 - Participant submission requirements: `docs/submission_rules.md`
+- Ready-to-upload participant package: `submission/README.md`
 - Organizer-only final judging controls: `organizer/JUDGING_RUNBOOK.md`
 - Organizer private release checklist: `organizer/private_release_checklist.md`
 - Judging day operations SOP: `organizer/JUDGING_DAY_SOP.md`

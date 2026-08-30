@@ -4,7 +4,11 @@ __pycache__/
 .env
 results.json
 data/catalog.jsonl
+data/test_set.jsonl
 data/releases/
+results/**/*1000*.json
+results/**/results_holdout*.json
+submission/dist/
 # Organizer-only code, private evaluation data, manifests, and build reports.
 organizer/
 secure/

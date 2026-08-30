@@ -1,0 +1,21 @@
+{
+  "entry_point": "agent:Agent",
+  "python": "3.12.13",
+  "requires_network": false,
+  "environment_variables": [],
+  "files": [
+    "MANIFEST.json",
+    "README.md",
+    "__init__.py",
+    "agent.py",
+    "benchmark.py",
+    "requirements.txt",
+    "run_local.py",
+    "src/__init__.py",
+    "src/agent.py",
+    "validate.py"
+  ],
+  "sha256": {
+    "src/agent.py": "49855eb8162bc197420598516893f809212f094907c36192cc153069986b7cf3"
+  }
+}
