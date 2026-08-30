@@ -40,9 +40,9 @@ Retrieval uses two complementary routes:
 
 If a restrictive individual query has no results, it falls back to an OR query over the same distinctive terms. Candidates from all routes are merged and deduplicated before reranking.
 
-The reranker retains field provenance instead of relying only on flattened text. An exact match against the product's final two category nodes receives a calibrated bonus, preventing an ancestor-only category occurrence from looking equally specific. Exact feature and detail values receive a smaller bonus because those fields are the source of many disclosed simulator constraints.
+The reranker retains field provenance instead of relying only on flattened text. A category receives exact-match credit only when it equals the product's final two canonical category nodes, preventing an ancestor-only occurrence from looking equally specific. The synthetic `color` label is removed before matching the actual color value. Exact multi-token feature and detail values receive a smaller bonus; generic one-word metadata does not.
 
-Recommendation presentation widens progressively. During the first three evidence-gathering turns, the agent presents only its strongest grounded match; from turn four onward it returns the requested Top-K. This avoids locking an otherwise relevant product at a poor reciprocal rank before distinguishing information arrives, while the later widening protects Hit Rate@10.
+Recommendation presentation widens progressively. During the first two evidence-gathering turns, the agent presents only its strongest grounded match; from turn three onward it returns the requested Top-K. An explicit intent replacement gets one precision-only recovery turn. If the customer initially declines the broad clarification, turn three also remains Top-1 because their distinguishing evidence arrives one turn later. This avoids locking a relevant product at a poor reciprocal rank while protecting Hit Rate@10.
 
 ### 3. Structured conversational state
 
@@ -66,7 +66,7 @@ When a user declines a requested attribute (for example, “I don't have a prefe
 
 ### 4. High-information clarification policy
 
-The agent first requests `other`, which permits the simulator to disclose the next most useful one or two constraints. This is followed by a feature/construction question if more information is needed. A no-preference response reopens the question so a subsequent clarification can still collect signal.
+The agent requests `other` on each of the first two clarification opportunities, which permits the customer to disclose as many as four useful constraints by turn three. Narrow, information-gain-selected questions follow if more evidence is needed. A no-preference response reopens the broad question so a subsequent clarification can still collect signal.
 
 Over-generality is detected when a request has at most one active constraint and lexical retrieval reaches the configured candidate-pool threshold. The dialog immediately enters `clarification` and asks for one or two non-negotiable details, with examples covering material, style, use case, and budget. The dense stage is cut off for that turn because broad expansion would add noise. A grounded lexical shortlist is still returned, preserving the opportunity for an early conversion while the clarification guides the next turn.
 
@@ -79,9 +79,9 @@ Candidates are reranked using:
 - token coverage for each disclosed constraint;
 - exact normalized phrase matches;
 - a small recency weight for later information; and
-- a minor overlap boost from profile preference tags.
+- canonical field checks for category, color, and exact multi-token evidence.
 
-The primary score remains based on stated requirements. This keeps the ranking interpretable and makes the system responsive to intent changes instead of using profile data as a replacement for current needs.
+The score is based on stated requirements plus a modest catalog-quality tie-breaker. Aggregate profile tags remain available for conversational guidance but do not alter product order, avoiding noisy matches on generic terms such as `fit` or `style`.
 
 ### 6. Catalog-quality tie-breaker
 
@@ -99,7 +99,7 @@ Every user turn is distilled into two memory layers:
 - **Short-term context**: a versioned summary containing the current intent, dialog phase, active slots grouped by type, the six most recent user turns, remaining turn budget, candidate count, overload status, and selected strategy.
 - **Personalized profile context**: the aggregate profile tags supplied at reset, rating style, purchase frequency, explicitly learned preferences, and attributes the customer declined to specify.
 
-The history window is bounded to avoid unbounded prompt/state growth. Learned preferences are recomputed from active preference slots on every turn, so an intent override removes superseded preferences from both dialog state and personalized ranking context. Base profile tags remain weak tie-breakers; they do not override explicit current-session requirements.
+The history window is bounded to avoid unbounded state growth. Learned preferences are recomputed from active preference slots on every turn, so an intent override removes superseded preferences from both dialog state and personalized context. Base profile tags can inform clarification wording, but explicit current-session requirements alone drive relevance ranking.
 
 The context program selects one of five workflows after each retrieval:
 
@@ -138,21 +138,36 @@ The current `results.json` is the complete 200-session public evaluation. These 
 
 | Metric | Current value | Target direction |
 | --- | ---: | --- |
-| Technical score | **0.954062** | Higher |
+| Technical score | **0.968439** | Higher |
 | Hit Rate@10 | **1.000000** | Higher |
-| MRR | **0.930208** | Higher |
-| MTTC | **2.250** | Lower |
-| Efficiency | **0.875000** | Higher |
+| MRR | **0.967464** | Higher |
+| MTTC | **2.090** | Lower |
+| Efficiency | **0.891000** | Higher |
 | Reported model tokens | **0** | Keep within deployment budget |
 
 | Scenario | Sessions | Hit Rate@10 | MRR | MTTC |
 | --- | ---: | ---: | ---: | ---: |
-| Buying | 80 | 1.000000 | 0.948854 | 1.750 |
-| Browsing | 80 | 1.000000 | 0.907708 | 2.175 |
-| Intent Override | 30 | 1.000000 | 0.945000 | 3.700 |
-| Boundary | 10 | 1.000000 | 0.916667 | 2.500 |
+| Buying | 80 | 1.000000 | 0.983036 | 1.575 |
+| Browsing | 80 | 1.000000 | 0.956250 | 1.925 |
+| Intent Override | 30 | 1.000000 | 0.975000 | 3.733 |
+| Boundary | 10 | 1.000000 | 0.910000 | 2.600 |
 
 The scenario table is especially useful for regression diagnosis: a higher aggregate score should not conceal a collapse in Buying precision or Intent Override recovery.
+
+The selected policy also improves every aggregate metric on the separate local
+1,000-session holdout:
+
+| Metric | Previous | Current | Change |
+| --- | ---: | ---: | ---: |
+| Technical score | 0.886401 | 0.901640 | +0.015239 |
+| Hit Rate@10 | 0.948000 | 0.950000 | +0.002000 |
+| MRR | 0.855135 | 0.885065 | +0.029930 |
+| MTTC | 3.207 | 2.944 | -0.263 turns |
+| Efficiency | 0.779300 | 0.805600 | +0.026300 |
+
+This holdout agreement is important: it shows the public gain is not merely a
+reordering of the 200 development targets. `results_holdout_final.json` contains
+the complete zero-token result, while `data/test_set.jsonl` is kept out of Git.
 
 The initial implementation achieved the following full public-set result:
 
@@ -202,36 +217,36 @@ The next robustness pass added Porter stemming to FTS5. It improved the complete
 }
 ```
 
-The current pass removed external-model ranking, added category-tail and
-feature/detail provenance scoring, and calibrated progressive Top-K widening.
+The current pass tightened category/color/evidence semantics, removed noisy
+profile overlap, repeated broad evidence collection once, and made Top-K
+widening sensitive to intent replacement and delayed evidence.
 The complete public evaluation now produces:
 
 ```json
 {
   "sample_count": 200,
   "hit_rate_at_10": 1.0,
-  "mrr": 0.930208,
-  "mttc": 2.25,
-  "efficiency": 0.875,
-  "recommended_technical_score": 0.954062,
+  "mrr": 0.967464,
+  "mttc": 2.09,
+  "efficiency": 0.891,
+  "recommended_technical_score": 0.968439,
   "reported_token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 }
 ```
 
-MTTC is higher than the previous always-Top-10 run because low-confidence
-early lists are intentionally withheld. Under the published formula, the MRR
-gain contributes substantially more than that turn-efficiency cost, increasing
-the overall technical score by `0.069496`.
+Compared with the previous deterministic result, MRR increases by `0.037256`
+and MTTC falls by `0.160` turns while Hit Rate remains perfect. Together these
+changes increase the technical score by `0.014377`, with no token usage.
 
 ### Improvement summary
 
 | Metric | Before | After | Change |
 | --- | ---: | ---: | ---: |
 | Hit Rate@10 | 0.765 | 1.000 | +0.235 |
-| MRR | 0.592990 | 0.930208 | +0.337218 |
-| MTTC | 4.395 | 2.250 | -2.145 turns |
-| Efficiency | 0.6605 | 0.8750 | +0.2145 |
-| Technical score | 0.692497 | 0.954062 | +0.261565 |
+| MRR | 0.592990 | 0.967464 | +0.374474 |
+| MTTC | 4.395 | 2.090 | -2.305 turns |
+| Efficiency | 0.6605 | 0.8910 | +0.2305 |
+| Technical score | 0.692497 | 0.968439 | +0.275942 |
 
 ## Generalization and Private-Test Considerations
 
@@ -252,7 +267,9 @@ The repository evaluator and dialog-state tests were executed successfully:
 Ran 17 tests ... OK
 ```
 
-The improved result above was produced by running the complete public evaluator over all 200 sessions, not a small sample.
+The improved result above was produced by running the complete public evaluator
+over all 200 sessions, not a small sample. The same source was then evaluated
+unchanged on all 1,000 holdout sessions.
 
 ## Limitations and Future Work
 

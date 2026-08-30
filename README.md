@@ -49,38 +49,46 @@ The following values are taken from the current `results.json` run over all 200 
 
 | Metric | Current value | Why it matters |
 | --- | ---: | --- |
-| Technical score | **0.954062** | Weighted objective: Hit Rate@10, MRR, and efficiency. |
+| Technical score | **0.968439** | Weighted objective: Hit Rate@10, MRR, and efficiency. |
 | Hit Rate@10 | **1.000000** | Target appears in the top ten recommendations. |
-| MRR | **0.930208** | Target is placed near the top of the list. |
-| MTTC | **2.250** | Fewer turns to first successful recommendation is better. |
-| Efficiency | **0.875000** | Turn-efficiency component of the score. |
+| MRR | **0.967464** | Target is placed near the top of the list. |
+| MTTC | **2.090** | Fewer turns to first successful recommendation is better. |
+| Efficiency | **0.891000** | Turn-efficiency component of the score. |
 | Prompt / completion tokens | **0 / 0** | Default offline path uses no external model tokens. |
 
 | Scenario | Sessions | Hit Rate@10 | MRR | MTTC |
 | --- | ---: | ---: | ---: | ---: |
-| Buying | 80 | 1.000000 | 0.948854 | 1.750 |
-| Browsing | 80 | 1.000000 | 0.907708 | 2.175 |
-| Intent Override | 30 | 1.000000 | 0.945000 | 3.700 |
-| Boundary | 10 | 1.000000 | 0.916667 | 2.500 |
+| Buying | 80 | 1.000000 | 0.983036 | 1.575 |
+| Browsing | 80 | 1.000000 | 0.956250 | 1.925 |
+| Intent Override | 30 | 1.000000 | 0.975000 | 3.733 |
+| Boundary | 10 | 1.000000 | 0.910000 | 2.600 |
+
+The same implementation was also evaluated on the local 1,000-session holdout.
+Its score improved from `0.886401` to `0.901640`: Hit Rate rose from `0.948`
+to `0.950`, MRR from `0.855135` to `0.885065`, and MTTC fell from `3.207`
+to `2.944`. The complete final holdout output is stored in
+`results/main/results_holdout_final.json`; the dataset itself is ignored by Git.
 
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
 
-The score increase comes from two deterministic changes. Ranking now rewards
-an exact match against the final category path and the original feature/detail
-field, instead of treating every occurrence in flattened catalog text as
-equivalent. Presentation is precision-first: while the first three turns gather
-distinguishing evidence, only the strongest grounded match is returned; from
-turn four onward the list widens to the requested Top-K to protect recall. This
-trades a modest MTTC increase for a substantially larger MRR gain under the
-published weighting, and fixes the previous single Top-10 miss.
+The score increase comes from deterministic, field-aware ranking and a calibrated
+conversation schedule. A category is exact only when it matches the product's
+canonical category tail; the synthetic `color` label is removed before matching;
+and only multi-token feature/detail values receive an exact-evidence bonus.
+Generic profile-tag overlap no longer perturbs otherwise grounded rankings.
+
+The agent asks the broad evidence question twice so the customer can disclose up
+to four useful facts by turn three. It returns only the strongest result for the
+first two turns, then widens to the requested Top-K. Intent replacements and a
+declined initial clarification receive one additional precision-only recovery
+turn. This raises both MRR and turn efficiency while preserving full Hit Rate@10.
 
 ## Deterministic retrieval
 
 The agent is deliberately offline. It does not inspect API credentials, make
 network calls, or consume model tokens. The current field-aware deterministic
-policy scores `0.954062` with zero tokens.
-
+policy scores `0.968439` with zero tokens.
 
 ## Agent Interface
 

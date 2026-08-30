@@ -133,11 +133,57 @@ class AgentDialogTest(unittest.TestCase):
             agent = self._agent(Path(directory), count=12)
             agent.reset("s", {"preference_tags": []})
             early = agent.respond("s", "I'm looking for Shoes.", 1, 10)
-            late = agent.respond("s", "I don't have an additional preference.", 4, 10)
+            late = agent.respond("s", "For that, what matters is: cotton lining.", 3, 10)
             self.assertEqual(len(early["recommendations"]), 1)
             self.assertEqual(early["dialog_state"]["recommendation_limit"], 1)
             self.assertEqual(len(late["recommendations"]), 10)
             self.assertEqual(late["dialog_state"]["recommendation_limit"], 10)
+
+    def test_second_turn_collects_remaining_broad_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._agent(Path(directory))
+            agent.reset("s", {"preference_tags": []})
+            first = agent.respond(
+                "s", "I'm looking for Shoes, but I'm still exploring.", 1, 10,
+            )
+            second = agent.respond(
+                "s", "For that, what matters is: cotton; comfortable.", 2, 10,
+            )
+            self.assertEqual(first["ask_attribute"], "other")
+            self.assertEqual(second["ask_attribute"], "other")
+            self.assertEqual(agent.sessions["s"]["last_ask"], "other")
+
+    def test_intent_override_gets_one_precision_recovery_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._agent(Path(directory), count=12)
+            agent.reset("s", {"preference_tags": []})
+            agent.respond("s", "I'm looking for Shoes. I prefer leather.", 1, 10)
+            response = agent.respond(
+                "s",
+                "Actually, ignore my earlier preference. What I need is: cotton.",
+                4,
+                10,
+            )
+            self.assertEqual(len(response["recommendations"]), 1)
+            self.assertEqual(response["dialog_state"]["recommendation_limit"], 1)
+
+    def test_declined_initial_clarification_delays_widening_one_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._agent(Path(directory), count=12)
+            agent.reset("s", {"preference_tags": []})
+            agent.respond("s", "I'm looking for Shoes, but I'm still exploring.", 1, 10)
+            agent.respond(
+                "s", "I don't have a preference for other; please use your judgment.", 2, 10,
+            )
+            recovery = agent.respond(
+                "s", "For that, what matters is: cotton lining.", 3, 10,
+            )
+            widened = agent.respond(
+                "s", "I don't have an additional preference for feature.", 4, 10,
+            )
+            self.assertEqual(len(recovery["recommendations"]), 1)
+            self.assertEqual(recovery["dialog_state"]["recommendation_limit"], 1)
+            self.assertEqual(len(widened["recommendations"]), 10)
 
     def test_exact_category_tail_beats_ancestor_only_match(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -220,6 +266,76 @@ class AgentDialogTest(unittest.TestCase):
             self.assertEqual(
                 response["recommendations"][0]["parent_asin"], "TARGET",
             )
+
+    def test_color_field_label_is_not_required_catalog_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.jsonl"
+            rows = [
+                {
+                    "parent_asin": "TARGET",
+                    "title": "Red walking shoe",
+                    "features": ["lightweight"],
+                    "details": {},
+                    "description": [],
+                    "categories": ["Clothing", "Shoes"],
+                    "average_rating": 3.0,
+                    "rating_number": 0,
+                },
+                {
+                    "parent_asin": "FIELD_ONLY",
+                    "title": "Walking shoe",
+                    "features": ["color accent"],
+                    "details": {},
+                    "description": [],
+                    "categories": ["Clothing", "Shoes"],
+                    "average_rating": 5.0,
+                    "rating_number": 100000,
+                },
+            ]
+            catalog.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            agent = Agent(catalog)
+            agent.reset("s", {"preference_tags": []})
+            response = agent.respond(
+                "s", "I'm looking for Shoes. Key requirement is: color: red.", 4, 10,
+            )
+            self.assertEqual(response["recommendations"][0]["parent_asin"], "TARGET")
+
+    def test_profile_terms_do_not_override_current_session_ranking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.jsonl"
+            rows = [
+                {
+                    "parent_asin": "TARGET",
+                    "title": "Walking shoe",
+                    "features": ["cotton lining"],
+                    "details": {},
+                    "description": [],
+                    "categories": ["Clothing", "Shoes"],
+                    "average_rating": 4.0,
+                    "rating_number": 21,
+                },
+                {
+                    "parent_asin": "PROFILE_ONLY",
+                    "title": "Durability walking shoe",
+                    "features": ["cotton lining"],
+                    "details": {},
+                    "description": [],
+                    "categories": ["Clothing", "Shoes"],
+                    "average_rating": 4.0,
+                    "rating_number": 20,
+                },
+            ]
+            catalog.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            agent = Agent(catalog)
+            agent.reset("s", {"preference_tags": ["durability"]})
+            response = agent.respond("s", "I'm looking for Shoes.", 4, 10)
+            self.assertEqual(response["recommendations"][0]["parent_asin"], "TARGET")
 
 if __name__ == "__main__":
     unittest.main()
