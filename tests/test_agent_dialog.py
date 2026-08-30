@@ -128,6 +128,98 @@ class AgentDialogTest(unittest.TestCase):
         attribute, _message, _utility = NextQuestionSelector.choose(state)
         self.assertEqual(attribute, "material")
 
+    def test_recommendations_widen_after_evidence_gathering(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            agent = self._agent(Path(directory), count=12)
+            agent.reset("s", {"preference_tags": []})
+            early = agent.respond("s", "I'm looking for Shoes.", 1, 10)
+            late = agent.respond("s", "I don't have an additional preference.", 4, 10)
+            self.assertEqual(len(early["recommendations"]), 1)
+            self.assertEqual(early["dialog_state"]["recommendation_limit"], 1)
+            self.assertEqual(len(late["recommendations"]), 10)
+            self.assertEqual(late["dialog_state"]["recommendation_limit"], 10)
+
+    def test_exact_category_tail_beats_ancestor_only_match(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.jsonl"
+            shared = {
+                "features": ["generic fabric"],
+                "details": {},
+                "description": [],
+                "rating_number": 0,
+            }
+            rows = [
+                {
+                    **shared,
+                    "parent_asin": "TARGET",
+                    "title": "Target garment",
+                    "categories": ["Clothing", "Novelty", "Women"],
+                    "average_rating": 3.0,
+                },
+                {
+                    **shared,
+                    "parent_asin": "ANCESTOR",
+                    "title": "Popular garment",
+                    "categories": [
+                        "Clothing", "Novelty", "Women", "Tops", "T-Shirts",
+                    ],
+                    "average_rating": 5.0,
+                    "rating_number": 100000,
+                },
+            ]
+            catalog.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            agent = Agent(catalog)
+            agent.reset("s", {"preference_tags": []})
+            response = agent.respond(
+                "s", "I'm looking for Novelty Women.", 4, 10,
+            )
+            self.assertEqual(
+                response["recommendations"][0]["parent_asin"], "TARGET",
+            )
+
+    def test_exact_feature_evidence_beats_description_only_match(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.jsonl"
+            rows = [
+                {
+                    "parent_asin": "TARGET",
+                    "title": "Target shoe",
+                    "features": ["Unique stitched gusset"],
+                    "details": {},
+                    "description": [],
+                    "categories": ["Clothing", "Shoes"],
+                    "average_rating": 3.0,
+                    "rating_number": 0,
+                },
+                {
+                    "parent_asin": "DESCRIPTION",
+                    "title": "Popular shoe",
+                    "features": ["generic construction"],
+                    "details": {},
+                    "description": ["Unique stitched gusset"],
+                    "categories": ["Clothing", "Shoes"],
+                    "average_rating": 5.0,
+                    "rating_number": 100000,
+                },
+            ]
+            catalog.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            agent = Agent(catalog)
+            agent.reset("s", {"preference_tags": []})
+            response = agent.respond(
+                "s",
+                "I'm looking for Shoes. Key requirement is: Unique stitched gusset.",
+                4,
+                10,
+            )
+            self.assertEqual(
+                response["recommendations"][0]["parent_asin"], "TARGET",
+            )
 
 if __name__ == "__main__":
     unittest.main()

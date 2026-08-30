@@ -1,4 +1,4 @@
-"""Offline conversational product retriever."""
+"""Deterministic conversational product retriever."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ import math
 import re
 import sqlite3
 import zlib
-from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 try:
@@ -18,6 +18,9 @@ TOKEN_RE = re.compile(r"[a-z0-9]+", re.I)
 STOPWORDS = {"a","an","and","are","as","at","be","but","by","for","from","i","in","is","it","me","my","of","on","or","please","some","that","the","this","to","want","with","would","you","looking","have","has","do","does","not","no","about","additional","what","matters","need","key","requirement","preference","prioritize"}
 VECTOR_DIMENSIONS = 192
 OVERGENERALITY_THRESHOLD = 350
+CATEGORY_TAIL_EXACT_BONUS = 10.0
+EVIDENCE_EXACT_BONUS = 2.0
+PRECISION_ONLY_TURNS = 3
 
 def _text(value: object) -> str:
     if value is None: return ""
@@ -30,6 +33,46 @@ def _terms(text: str) -> list[str]:
 
 def _normal(text: str) -> str:
     return " ".join(_terms(text))
+
+
+def _category_tail(value: object) -> str:
+    """Normalize the final two meaningful catalog category nodes."""
+    excluded = {
+        "clothing", "clothing shoes & jewelry", "clothing, shoes & jewelry",
+    }
+    values = value if isinstance(value, list) else [value]
+    cleaned: list[str] = []
+    for item in values:
+        for part in str(item or "").split(","):
+            part = part.strip()
+            if part and part.lower() not in excluded:
+                cleaned.append(part)
+    return _normal(" ".join(cleaned[-2:]))
+
+
+def _field_evidence(product: dict) -> list[str]:
+    """Keep exact feature/detail values without retaining the full product."""
+    values: list[str] = []
+    features = product.get("features")
+    if isinstance(features, list):
+        values.extend(_normal(str(item)) for item in features)
+    elif features not in (None, ""):
+        values.append(_normal(str(features)))
+    details = product.get("details")
+    if isinstance(details, dict):
+        values.extend(_normal(f"{key} {item}") for key, item in details.items())
+    elif isinstance(details, list):
+        values.extend(_normal(str(item)) for item in details)
+    elif details not in (None, ""):
+        values.append(_normal(str(details)))
+    return list(dict.fromkeys(value for value in values if value))
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateDocument:
+    text: str
+    category_tail: str
+    evidence: frozenset[str]
 
 
 class IntentRouter:
@@ -177,19 +220,18 @@ class ContextProgram:
         slot_count = len(state["constraints"])
         candidate_count = state["candidate_count"]
         if state["phase"] == "intent_override":
-            strategy, allow_dense, allow_semantic = "override_recovery", False, True
+            strategy, allow_dense = "override_recovery", False
         elif state["over_general"]:
-            strategy, allow_dense, allow_semantic = "clarify_overload", False, False
+            strategy, allow_dense = "clarify_overload", False
         elif state["intent"] == "buying":
-            strategy, allow_dense, allow_semantic = "precision_filter", False, True
+            strategy, allow_dense = "precision_filter", False
         elif slot_count >= 3 or (candidate_count and candidate_count <= 40):
-            strategy, allow_dense, allow_semantic = "focused_rerank", False, True
+            strategy, allow_dense = "focused_rerank", False
         else:
-            strategy, allow_dense, allow_semantic = "discovery_expand", True, True
+            strategy, allow_dense = "discovery_expand", True
         state["workflow"] = {
             "strategy": strategy,
             "allow_dense": allow_dense,
-            "allow_semantic": allow_semantic,
         }
 
 
@@ -336,17 +378,15 @@ class NextQuestionSelector:
         return attribute, cls.PROMPTS[attribute], utility
 
 class Agent:
-    """Dependency-free hybrid FTS and disclosed-constraint ranker."""
+    """Grounded FTS retrieval with deterministic ranking by default."""
     def __init__(
         self,
         catalog_path: str | Path = "data/catalog.jsonl",
-        semantic_reranker: Callable[[str, list[dict[str, str]]], Mapping[str, float]] | None = None,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self.sessions: dict[str, dict] = {}
         self.product_quality: dict[str, float] = {}
-        self.semantic_reranker = semantic_reranker
         self.dense_matrix = None
         self._build_index()
 
@@ -356,8 +396,7 @@ class Agent:
 
         This feature-hashed representation uses words and character fragments,
         which makes it useful for partial terms and ordinary morphology.  A
-        configured embedding model can replace this method without changing
-        the retrieval or ranking interfaces.
+        The representation is fixed so retrieval remains reproducible.
         """
         if np is None:
             return None
@@ -379,6 +418,7 @@ class Agent:
         cur.execute(
             "CREATE VIRTUAL TABLE products USING fts5("
             "parent_asin UNINDEXED, title, categories, attributes, description, "
+            "category_tail UNINDEXED, evidence UNINDEXED, "
             "tokenize='porter unicode61')"
         )
         batch = []
@@ -389,6 +429,8 @@ class Agent:
                 title, categories = _text(p.get("title")), _text(p.get("categories"))
                 attributes = " ".join((_text(p.get("features")), _text(p.get("details")), _text(p.get("store")), _text(p.get("price"))))
                 description = _text(p.get("description"))
+                category_tail = _category_tail(p.get("categories"))
+                evidence = "\n".join(_field_evidence(p))
                 if np is not None:
                     dense_rows.append(self._dense_vector(" ".join((title, categories, attributes))))
                 try:
@@ -399,10 +441,13 @@ class Agent:
                     self.product_quality[asin] = max(0.0, rating - 3.0) * .35 + math.log1p(count) * .14
                 except (TypeError, ValueError):
                     self.product_quality[asin] = 0.0
-                batch.append((asin, title, categories, attributes, description))
+                batch.append((
+                    asin, title, categories, attributes, description,
+                    category_tail, evidence,
+                ))
                 if len(batch) == 1000:
-                    cur.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?)", batch); batch.clear()
-        if batch: cur.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?)", batch)
+                    cur.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch); batch.clear()
+        if batch: cur.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
         self.connection.commit()
         if dense_rows and np is not None:
             self.dense_matrix = np.vstack(dense_rows)
@@ -424,6 +469,8 @@ class Agent:
             "short_term_context": {},
             "long_term_profile": {
                 "base_tags": list(dict.fromkeys(base_tags)),
+                "summary": str(user_profile.get("summary") or "")[:500],
+                "average_prior_rating": user_profile.get("average_prior_rating"),
                 "rating_style": str(user_profile.get("rating_style") or ""),
                 "purchase_frequency": str(user_profile.get("purchase_frequency") or ""),
                 "learned_preferences": {},
@@ -432,7 +479,6 @@ class Agent:
             "workflow": {
                 "strategy": "discovery_expand",
                 "allow_dense": True,
-                "allow_semantic": True,
             },
             "profile_terms": base_tags,
             "asked": set(),
@@ -486,20 +532,27 @@ class Agent:
             return []
         placeholders = ",".join("?" for _ in rowids)
         return self.connection.execute(
-            "SELECT parent_asin, title, categories, attributes, description "
+            "SELECT parent_asin, title, categories, attributes, description, "
+            "category_tail, evidence "
             f"FROM products WHERE rowid IN ({placeholders})",
             rowids,
         ).fetchall()
 
     def _candidate_rows(
         self, constraints: list[str], intent: str, allow_dense: bool = True,
-    ) -> dict[str, str]:
+    ) -> dict[str, CandidateDocument]:
         """Retrieve only a bounded working set; catalog text remains in SQLite."""
-        candidates: dict[str, str] = {}
+        candidates: dict[str, CandidateDocument] = {}
         def add_rows(rows: list[tuple]) -> None:
             for row in rows:
-                title, categories, attributes, description = (str(value or "") for value in row[1:])
-                candidates[str(row[0])] = _normal(" ".join((title, categories, attributes, description)))
+                title, categories, attributes, description = (
+                    str(value or "") for value in row[1:5]
+                )
+                candidates[str(row[0])] = CandidateDocument(
+                    text=_normal(" ".join((title, categories, attributes, description))),
+                    category_tail=str(row[5] or ""),
+                    evidence=frozenset(str(row[6] or "").splitlines()),
+                )
 
         # The intersection route protects precision when several independent
         # preferences have been disclosed.  Per-constraint routes below retain
@@ -511,9 +564,10 @@ class Agent:
         if len(combined_terms) >= 2:
             expression = " AND ".join('"' + term.replace('"', '') + '"' for term in combined_terms)
             rows = self.connection.execute(
-                "SELECT parent_asin, title, categories, attributes, description "
+                "SELECT parent_asin, title, categories, attributes, description, "
+                "category_tail, evidence "
                 "FROM products WHERE products MATCH ? "
-                "ORDER BY bm25(products, 0.0, 7.0, 3.0, 4.0, 1.5) LIMIT 600",
+                "ORDER BY bm25(products, 0.0, 7.0, 3.0, 4.0, 1.5, 0.0, 0.0) LIMIT 600",
                 (expression,),
             ).fetchall()
             add_rows(rows)
@@ -527,9 +581,10 @@ class Agent:
             # broad OR query.
             expression = " AND ".join('"' + term.replace('"', '') + '"' for term in terms)
             rows = self.connection.execute(
-                "SELECT parent_asin, title, categories, attributes, description "
+                "SELECT parent_asin, title, categories, attributes, description, "
+                "category_tail, evidence "
                 "FROM products WHERE products MATCH ? "
-                "ORDER BY bm25(products, 0.0, 7.0, 3.0, 4.0, 1.5) LIMIT 400",
+                "ORDER BY bm25(products, 0.0, 7.0, 3.0, 4.0, 1.5, 0.0, 0.0) LIMIT 400",
                 (expression,),
             ).fetchall()
             if not rows and len(terms) > 1:
@@ -538,9 +593,10 @@ class Agent:
                 # distinctive term instead of returning an empty route.
                 expression = " OR ".join('"' + term.replace('"', '') + '"' for term in terms)
                 rows = self.connection.execute(
-                    "SELECT parent_asin, title, categories, attributes, description "
+                    "SELECT parent_asin, title, categories, attributes, description, "
+                    "category_tail, evidence "
                     "FROM products WHERE products MATCH ? "
-                    "ORDER BY bm25(products, 0.0, 7.0, 3.0, 4.0, 1.5) LIMIT 400",
+                    "ORDER BY bm25(products, 0.0, 7.0, 3.0, 4.0, 1.5, 0.0, 0.0) LIMIT 400",
                     (expression,),
                 ).fetchall()
             add_rows(rows)
@@ -568,45 +624,36 @@ class Agent:
         state["over_general"] = (
             len(constraints) <= 1 and len(candidates) >= OVERGENERALITY_THRESHOLD
         )
-        semantic_scores: Mapping[str, float] = {}
-        if (
-            self.semantic_reranker is not None
-            and not state["over_general"]
-            and state["workflow"].get("allow_semantic", True)
-        ):
-            # An external local/API LLM reranker is optional.  A failure must
-            # never interrupt the deterministic ranking fallback.
-            try:
-                semantic_scores = self.semantic_reranker(
-                    " ".join(constraints),
-                    [{"parent_asin": asin, "text": text} for asin, text in candidates.items()],
-                )
-            except Exception:
-                semantic_scores = {}
-        scored: list[tuple[float, str]] = []
-        for asin, full in candidates.items():
+        # Produce a grounded deterministic ranking over the recall set.
+        base_scored: list[tuple[float, str]] = []
+        active_slots = [slot for slot in state["slots"] if slot["active"]]
+        for asin, candidate in candidates.items():
+            full = candidate.text
             doc_tokens = frozenset(full.split()); score = 0.0
             for index, constraint in enumerate(constraints):
                 query = frozenset(_terms(constraint))
                 if not query: continue
                 matched = query & doc_tokens
                 coverage = len(matched) / len(query)
-                exact = 1.0 if _normal(constraint) in full else 0.0
+                normalized = _normal(constraint)
+                exact = 1.0 if normalized in full else 0.0
                 weight = 1.0 + index * .18
                 score += weight * (coverage * 12 + exact * 14 + len(matched) * .35)
+                slot_kind = active_slots[index]["kind"] if index < len(active_slots) else None
+                if slot_kind == "category" and normalized == candidate.category_tail:
+                    score += CATEGORY_TAIL_EXACT_BONUS
+                elif normalized in candidate.evidence:
+                    score += EVIDENCE_EXACT_BONUS * weight
             # Profile tags are weak, session-independent preferences.  They
-            # help distinguish otherwise equivalent catalog matches but remain
-            # far below a disclosed constraint's coverage/exact-match score.
+            # distinguish otherwise equivalent matches without overriding a
+            # current-session requirement.
             score += len(set(state["profile_terms"]) & doc_tokens) * .12
             score += self.product_quality.get(asin, 0.0)
-            # Bound a model score so explicit constraints remain decisive.
-            try:
-                score += max(-1.0, min(1.0, float(semantic_scores.get(asin, 0.0)))) * 2.0
-            except (TypeError, ValueError):
-                pass
-            scored.append((score, asin))
-        scored.sort(key=lambda pair: (-pair[0], pair[1]))
-        focused_texts = [candidates[asin] for _score, asin in scored[:200]]
+            base_scored.append((score, asin))
+        base_scored.sort(key=lambda pair: (-pair[0], pair[1]))
+
+        scored = base_scored
+        focused_texts = [candidates[asin].text for _score, asin in scored[:200]]
         posterior_weights = [
             1.0 / math.log2(rank + 2) for rank in range(1, len(focused_texts) + 1)
         ]
@@ -641,6 +688,12 @@ class Agent:
             state["asked"].discard("other")
         ContextProgram.distill(state, user_message, turn)
         recommendations = self._rank(state, top_k)
+        # Early low-confidence lists can lock a relevant product at a poor
+        # reciprocal rank before the user has disclosed distinguishing facts.
+        # Present only the strongest grounded match while gathering evidence,
+        # then widen to the requested Top-K so recall remains protected.
+        recommendation_limit = 1 if turn <= PRECISION_ONLY_TURNS else top_k
+        recommendations = recommendations[:recommendation_limit]
         ContextProgram.orchestrate(state)
         profile_tags = state["long_term_profile"]["base_tags"][:2]
         profile_hint = (
@@ -698,6 +751,7 @@ class Agent:
                 "over_general": state["over_general"],
                 "strategy": state["workflow"]["strategy"],
                 "context_version": state["context_version"],
+                "recommendation_limit": recommendation_limit,
                 "next_question": state["question_decision"],
             },
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},

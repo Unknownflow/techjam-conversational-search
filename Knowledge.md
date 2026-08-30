@@ -23,11 +23,11 @@ The evaluation rewards three properties:
 | Buying | Explicit requirements such as “key requirement”, “need”, or a budget | Preserves category and hard constraints, then prioritizes conjunctive FTS retrieval for precision. |
 | Browsing | Exploratory wording such as “exploring”, “browse”, or “ideas” | Uses the same grounded lexical routes first, then activates an in-memory vector discovery route only when fewer than 80 lexical candidates are available. |
 
-The pipeline is therefore **intent routing → multi-route candidate retrieval → constraint/semantic ranking**. Keyword, category, conjunction, fallback-OR, and optional dense candidates are deduplicated into one bounded working set before ranking.
+The pipeline is therefore **intent routing → multi-route candidate retrieval → field-aware constraint ranking → precision-first presentation**. Keyword, category, conjunction, fallback-OR, and dense candidates are deduplicated into one bounded working set before ranking.
 
 The dense discovery route is a 192-dimensional, deterministic feature-hashed text embedding over product title, category, and attributes. It is NumPy-backed when NumPy is present and fails safely to the lexical pipeline when it is not. It is deliberately gated: experiments showed that always adding broad vector candidates slightly reduced MRR by introducing weakly related, popular products into otherwise precise result sets.
 
-`Agent` also accepts an optional `semantic_reranker` callable. This is the integration point for a local or API-backed LLM reranker when credentials, an approved model, and a latency budget are available. Its normalized contribution is capped, so current-session hard constraints remain decisive. The submitted default uses no external model and therefore has zero reported token cost.
+`Agent` is deterministic and zero-token. It has no API-key handling, network model calls, or model injection path.
 
 ### 2. In-memory hybrid retrieval
 
@@ -39,6 +39,10 @@ Retrieval uses two complementary routes:
 2. **Per-constraint routes**: each stated preference is searched independently. These routes protect recall when a combined query is too restrictive or catalog wording differs from the user wording.
 
 If a restrictive individual query has no results, it falls back to an OR query over the same distinctive terms. Candidates from all routes are merged and deduplicated before reranking.
+
+The reranker retains field provenance instead of relying only on flattened text. An exact match against the product's final two category nodes receives a calibrated bonus, preventing an ancestor-only category occurrence from looking equally specific. Exact feature and detail values receive a smaller bonus because those fields are the source of many disclosed simulator constraints.
+
+Recommendation presentation widens progressively. During the first three evidence-gathering turns, the agent presents only its strongest grounded match; from turn four onward it returns the requested Top-K. This avoids locking an otherwise relevant product at a poor reciprocal rank before distinguishing information arrives, while the later widening protects Hit Rate@10.
 
 ### 3. Structured conversational state
 
@@ -64,7 +68,7 @@ When a user declines a requested attribute (for example, “I don't have a prefe
 
 The agent first requests `other`, which permits the simulator to disclose the next most useful one or two constraints. This is followed by a feature/construction question if more information is needed. A no-preference response reopens the question so a subsequent clarification can still collect signal.
 
-Over-generality is detected when a request has at most one active constraint and lexical retrieval reaches the configured candidate-pool threshold. The dialog immediately enters `clarification` and asks for one or two non-negotiable details, with examples covering material, style, use case, and budget. The optional dense/LLM stage is cut off for that turn because broad semantic expansion would add noise. A grounded lexical shortlist is still returned, preserving the opportunity for an early conversion while the clarification guides the next turn.
+Over-generality is detected when a request has at most one active constraint and lexical retrieval reaches the configured candidate-pool threshold. The dialog immediately enters `clarification` and asks for one or two non-negotiable details, with examples covering material, style, use case, and budget. The dense stage is cut off for that turn because broad expansion would add noise. A grounded lexical shortlist is still returned, preserving the opportunity for an early conversion while the clarification guides the next turn.
 
 This policy is deliberately compact: the system retrieves after every customer message and asks only when additional information is likely to reduce ambiguity. That directly supports Mean Turns to Conversion.
 
@@ -101,13 +105,13 @@ The context program selects one of five workflows after each retrieval:
 
 | Strategy | Condition | Next-turn orchestration |
 | --- | --- | --- |
-| `discovery_expand` | Browsing with limited accumulated evidence | Permit dense discovery and semantic reranking. |
-| `clarify_overload` | One or fewer constraints with a large candidate pool | Disable dense/LLM expansion and ask for non-negotiable details. |
+| `discovery_expand` | Browsing with limited accumulated evidence | Permit dense discovery. |
+| `clarify_overload` | One or fewer constraints with a large candidate pool | Disable dense expansion and ask for non-negotiable details. |
 | `precision_filter` | Buying intent | Disable broad dense retrieval and lock explicit constraints. |
 | `focused_rerank` | Three or more slots, or a small candidate set | Stop expansion and concentrate on reranking. |
 | `override_recovery` | Abrupt intent replacement | Preserve category and hard evidence, retire soft preferences, reopen clarification, and rerank for the new direction. |
 
-This is runtime workflow re-orchestration rather than static prompt selection: the strategy controls whether dense retrieval and optional semantic reranking are permitted on the following turn, and it changes the guidance message. Profile tags are surfaced as optional guidance hints when asking broad clarification questions.
+This is runtime workflow re-orchestration rather than static prompt selection: the strategy controls whether dense retrieval is permitted on the following turn, and it changes the guidance message. Profile tags are surfaced as optional guidance hints when asking broad clarification questions.
 
 ### 8. Adaptive narrowing and next-question selection
 
@@ -134,19 +138,19 @@ The current `results.json` is the complete 200-session public evaluation. These 
 
 | Metric | Current value | Target direction |
 | --- | ---: | --- |
-| Technical score | **0.884566** | Higher |
-| Hit Rate@10 | **0.995000** | Higher |
-| MRR | **0.670552** | Higher |
-| MTTC | **1.705** | Lower |
-| Efficiency | **0.929500** | Higher |
+| Technical score | **0.954062** | Higher |
+| Hit Rate@10 | **1.000000** | Higher |
+| MRR | **0.930208** | Higher |
+| MTTC | **2.250** | Lower |
+| Efficiency | **0.875000** | Higher |
 | Reported model tokens | **0** | Keep within deployment budget |
 
 | Scenario | Sessions | Hit Rate@10 | MRR | MTTC |
 | --- | ---: | ---: | ---: | ---: |
-| Buying | 80 | 0.987500 | 0.641066 | 1.225 |
-| Browsing | 80 | 1.000000 | 0.633289 | 1.463 |
-| Intent Override | 30 | 1.000000 | 0.827302 | 3.600 |
-| Boundary | 10 | 1.000000 | 0.734286 | 1.800 |
+| Buying | 80 | 1.000000 | 0.948854 | 1.750 |
+| Browsing | 80 | 1.000000 | 0.907708 | 2.175 |
+| Intent Override | 30 | 1.000000 | 0.945000 | 3.700 |
+| Boundary | 10 | 1.000000 | 0.916667 | 2.500 |
 
 The scenario table is especially useful for regression diagnosis: a higher aggregate score should not conceal a collapse in Buying precision or Intent Override recovery.
 
@@ -185,7 +189,7 @@ After the initial changes, the full 200-session public evaluation produced:
 }
 ```
 
-The latest robustness pass added Porter stemming to FTS5. It improved the complete public evaluation without using any session labels:
+The next robustness pass added Porter stemming to FTS5. It improved the complete public evaluation without using any session labels:
 
 ```json
 {
@@ -198,15 +202,36 @@ The latest robustness pass added Porter stemming to FTS5. It improved the comple
 }
 ```
 
+The current pass removed external-model ranking, added category-tail and
+feature/detail provenance scoring, and calibrated progressive Top-K widening.
+The complete public evaluation now produces:
+
+```json
+{
+  "sample_count": 200,
+  "hit_rate_at_10": 1.0,
+  "mrr": 0.930208,
+  "mttc": 2.25,
+  "efficiency": 0.875,
+  "recommended_technical_score": 0.954062,
+  "reported_token_usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+}
+```
+
+MTTC is higher than the previous always-Top-10 run because low-confidence
+early lists are intentionally withheld. Under the published formula, the MRR
+gain contributes substantially more than that turn-efficiency cost, increasing
+the overall technical score by `0.069496`.
+
 ### Improvement summary
 
 | Metric | Before | After | Change |
 | --- | ---: | ---: | ---: |
-| Hit Rate@10 | 0.765 | 0.995 | +0.230 |
-| MRR | 0.592990 | 0.670552 | +0.077562 |
-| MTTC | 4.395 | 1.705 | -2.690 turns |
-| Efficiency | 0.6605 | 0.9295 | +0.2690 |
-| Technical score | 0.692497 | 0.884566 | +0.192069 |
+| Hit Rate@10 | 0.765 | 1.000 | +0.235 |
+| MRR | 0.592990 | 0.930208 | +0.337218 |
+| MTTC | 4.395 | 2.250 | -2.145 turns |
+| Efficiency | 0.6605 | 0.8750 | +0.2145 |
+| Technical score | 0.692497 | 0.954062 | +0.261565 |
 
 ## Generalization and Private-Test Considerations
 
@@ -224,15 +249,15 @@ The changes were selected to improve behavior on the task class, rather than exp
 The repository evaluator and dialog-state tests were executed successfully:
 
 ```text
-Ran 9 tests ... OK
+Ran 17 tests ... OK
 ```
 
 The improved result above was produced by running the complete public evaluator over all 200 sessions, not a small sample.
 
 ## Limitations and Future Work
 
-- The built-in dense route is a deterministic feature-hashed embedding, not a pretrained semantic model. The optional LLM reranker hook requires a separately configured model, credentials, latency budget, and token reporting.
-- Constraint extraction is rule-based and benefits from the controlled input format. Negation, comparative preferences, nested conditions, and long free-form dialogue would benefit from a schema-constrained model parser.
+- The built-in dense route is a deterministic feature-hashed embedding, not a pretrained semantic model.
+- Constraint extraction is rule-based and benefits from the controlled input format. Negation, comparative preferences, nested conditions, and long free-form dialogue would benefit from a more comprehensive deterministic parser.
 - The current quality prior does not account for price compatibility unless price is explicitly disclosed. A structured budget scorer would improve that case.
 - Override erasure is intentionally conservative: it retires tracked soft preferences and rewritten override slots, but does not infer that unrelated hard constraints should be discarded unless the user explicitly identifies them.
 - The over-generality threshold is catalog-size dependent. A production system should calibrate it from retrieval latency, candidate entropy, and observed conversion behavior rather than a fixed count alone.

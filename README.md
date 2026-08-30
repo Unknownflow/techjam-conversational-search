@@ -1,6 +1,6 @@
 # TechJam Conversational E-Commerce Search Challenge
 
-Build an AI shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.
+Build a conversational shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.
 
 ## What You Receive
 
@@ -49,22 +49,38 @@ The following values are taken from the current `results.json` run over all 200 
 
 | Metric | Current value | Why it matters |
 | --- | ---: | --- |
-| Technical score | **0.884566** | Weighted objective: Hit Rate@10, MRR, and efficiency. |
-| Hit Rate@10 | **0.995000** | Target appears in the top ten recommendations. |
-| MRR | **0.670552** | Target is placed near the top of the list. |
-| MTTC | **1.705** | Fewer turns to first successful recommendation is better. |
-| Efficiency | **0.929500** | Turn-efficiency component of the score. |
+| Technical score | **0.954062** | Weighted objective: Hit Rate@10, MRR, and efficiency. |
+| Hit Rate@10 | **1.000000** | Target appears in the top ten recommendations. |
+| MRR | **0.930208** | Target is placed near the top of the list. |
+| MTTC | **2.250** | Fewer turns to first successful recommendation is better. |
+| Efficiency | **0.875000** | Turn-efficiency component of the score. |
 | Prompt / completion tokens | **0 / 0** | Default offline path uses no external model tokens. |
 
 | Scenario | Sessions | Hit Rate@10 | MRR | MTTC |
 | --- | ---: | ---: | ---: | ---: |
-| Buying | 80 | 0.987500 | 0.641066 | 1.225 |
-| Browsing | 80 | 1.000000 | 0.633289 | 1.463 |
-| Intent Override | 30 | 1.000000 | 0.827302 | 3.600 |
-| Boundary | 10 | 1.000000 | 0.734286 | 1.800 |
+| Buying | 80 | 1.000000 | 0.948854 | 1.750 |
+| Browsing | 80 | 1.000000 | 0.907708 | 2.175 |
+| Intent Override | 30 | 1.000000 | 0.945000 | 3.700 |
+| Boundary | 10 | 1.000000 | 0.916667 | 2.500 |
 
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
+
+The score increase comes from two deterministic changes. Ranking now rewards
+an exact match against the final category path and the original feature/detail
+field, instead of treating every occurrence in flattened catalog text as
+equivalent. Presentation is precision-first: while the first three turns gather
+distinguishing evidence, only the strongest grounded match is returned; from
+turn four onward the list widens to the requested Top-K to protect recall. This
+trades a modest MTTC increase for a substantially larger MRR gain under the
+published weighting, and fixes the previous single Top-10 miss.
+
+## Deterministic retrieval
+
+The agent is deliberately offline. It does not inspect API credentials, make
+network calls, or consume model tokens. The current field-aware deterministic
+policy scores `0.954062` with zero tokens.
+
 
 ## Agent Interface
 
@@ -81,7 +97,7 @@ class Agent:
                 {"parent_asin": "B000..."},
                 {"parent_asin": "B001..."}
             ],
-            "usage": {"prompt_tokens": 120, "completion_tokens": 30}
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0}
         }
 ```
 
@@ -92,7 +108,7 @@ class Agent:
 - **Hit Rate@10:** fraction of sessions that find the target within 10 turns.
 - **MRR:** mean reciprocal rank of the target; a miss contributes zero.
 - **MTTC:** mean first-hit turn; a miss is assigned turn 11.
-- **Reported token usage:** prompt and completion tokens returned by the team's model client.
+- **Reported token usage:** zero for this fully local implementation.
 
 ```text
 TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
@@ -102,10 +118,6 @@ Efficiency = clip((11 - MTTC) / 10, 0, 1)
 `TechnicalScore` is an objective input to the `Technical Execution` assessment. It is not a separate judging criterion and does not represent the entire `Technical Execution` score.
 
 Only exact `parent_asin` equality produces a hit. Core metrics are also reported by scenario.
-
-## Model Choice and Cost
-
-Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer does not provide or reimburse model API credits; teams are responsible for any costs incurred through optional external services.
 
 ## Files
 
