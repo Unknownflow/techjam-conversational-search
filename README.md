@@ -88,6 +88,29 @@ The agent is deliberately offline. It does not inspect API credentials, make
 network calls, or consume model tokens. The current field-aware deterministic
 policy scores `0.968439` with zero tokens.
 
+## Candidate diagnostics
+
+For development, the repository includes a public-set diagnostic script that
+explains whether unresolved or slow sessions are retrieval, ranking, or dialog
+issues. This script uses released public labels through the evaluator helpers and
+is not part of the production agent interface.
+
+```bash
+python3 -m tools.candidate_diagnostics \
+  --catalog data/catalog.jsonl \
+  --dataset data/public_set.jsonl \
+  --output results/candidate_diagnostics.json
+```
+
+The JSON output includes aggregate metrics, failure-mode counts, scenario
+breakdowns, rank and turn distributions, optimization target sample IDs, and an
+`improvement_focus` section. The focus section flags three priority
+underperforming sessions for retrieval routes, ranking weights, dialog /
+clarification policy, and intent override handling, each ranked by one metric.
+Pass `--include-session-traces` when you also need every per-turn trace with
+candidate-pool size, target candidate rank, returned rank, active constraints,
+strategy, and next-question utility.
+
 ## Agent Interface
 
 ```python
