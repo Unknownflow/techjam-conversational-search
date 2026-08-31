@@ -6,376 +6,34 @@ import math
 import re
 import sqlite3
 import zlib
-from dataclasses import dataclass
 from pathlib import Path
+
+from .candidate_document import CandidateDocument
+from .context_program import ContextProgram
+from .dialog_state_machine import DialogStateMachine
+from .intent_router import IntentRouter
+from .next_question_selector import NextQuestionSelector
+from .text_utils import (
+    _category_tail,
+    _field_evidence,
+    _normal,
+    _terms,
+    _text,
+)
 
 try:
     import numpy as np
 except ImportError:  # The lexical pipeline remains fully functional without it.
     np = None
 
-TOKEN_RE = re.compile(r"[a-z0-9]+", re.I)
-STOPWORDS = {"a","an","and","are","as","at","be","but","by","for","from","i","in","is","it","me","my","of","on","or","please","some","that","the","this","to","want","with","would","you","looking","have","has","do","does","not","no","about","additional","what","matters","need","key","requirement","preference","prioritize"}
 VECTOR_DIMENSIONS = 192
+# Keep this threshold in the entry-point module so existing callers can patch
+# starter.agent.OVERGENERALITY_THRESHOLD.
 OVERGENERALITY_THRESHOLD = 350
 CATEGORY_TAIL_EXACT_BONUS = 10.0
 EVIDENCE_EXACT_BONUS = 2.0
 INITIAL_PRECISION_TURNS = 2
 
-def _text(value: object) -> str:
-    if value is None: return ""
-    if isinstance(value, dict): return " ".join(f"{k} {v}" for k, v in value.items())
-    if isinstance(value, list): return " ".join(str(v) for v in value)
-    return str(value)
-
-def _terms(text: str) -> list[str]:
-    return [t.lower() for t in TOKEN_RE.findall(text) if len(t) > 1 and t.lower() not in STOPWORDS]
-
-def _normal(text: str) -> str:
-    return " ".join(_terms(text))
-
-
-def _category_tail(value: object) -> str:
-    """Normalize the final two meaningful catalog category nodes."""
-    excluded = {
-        "clothing", "clothing shoes & jewelry", "clothing, shoes & jewelry",
-    }
-    values = value if isinstance(value, list) else [value]
-    cleaned: list[str] = []
-    for item in values:
-        for part in str(item or "").split(","):
-            part = part.strip()
-            if part and part.lower() not in excluded:
-                cleaned.append(part)
-    return _normal(" ".join(cleaned[-2:]))
-
-
-def _field_evidence(product: dict) -> list[str]:
-    """Keep exact feature/detail values without retaining the full product."""
-    values: list[str] = []
-    features = product.get("features")
-    if isinstance(features, list):
-        values.extend(_normal(str(item)) for item in features)
-    elif features not in (None, ""):
-        values.append(_normal(str(features)))
-    details = product.get("details")
-    if isinstance(details, dict):
-        values.extend(_normal(f"{key} {item}") for key, item in details.items())
-    elif isinstance(details, list):
-        values.extend(_normal(str(item)) for item in details)
-    elif details not in (None, ""):
-        values.append(_normal(str(details)))
-    return list(dict.fromkeys(value for value in values if value))
-
-
-@dataclass(frozen=True, slots=True)
-class CandidateDocument:
-    text: str
-    category_tail: str
-    evidence: frozenset[str]
-
-
-class IntentRouter:
-    """Choose precision-first Buying or discovery-first Browsing retrieval."""
-
-    BUYING_SIGNALS = ("key requirement", "what i need", "must have", "need ", "budget")
-    BROWSING_SIGNALS = ("exploring", "browse", "ideas", "inspiration", "not sure")
-
-    @classmethod
-    def route(cls, message: str) -> str:
-        lowered = message.lower()
-        if any(signal in lowered for signal in cls.BROWSING_SIGNALS):
-            return "browsing"
-        if any(signal in lowered for signal in cls.BUYING_SIGNALS):
-            return "buying"
-        return "browsing"
-
-
-class DialogStateMachine:
-    """Accumulate slots, retire superseded preferences, and expose dialog phase."""
-
-    MATERIALS = {
-        "acetate", "acrylic", "aluminum", "aluminium", "bamboo", "brass",
-        "canvas", "carbon", "cashmere", "ceramic", "chiffon", "chrome",
-        "corduroy", "cork", "cotton", "crystal", "denim", "elastic", "fabric",
-        "faux fur", "faux leather", "felt", "fiberglass", "flannel", "foam",
-        "fur", "glass", "gold", "hemp", "iron", "jute", "lace", "latex", "leather",
-        "linen", "lycra", "mesh", "metal", "microfiber", "modal", "neoprene", "nickel",
-        "nylon", "paper", "pearl", "pewter", "plastic", "pleather", "polyamide", "polyester",
-        "polypropylene", "polyurethane", "porcelain", "rayon", "resin", "rubber", "satin",
-        "silicone", "silk", "silver", "spandex", "stainless steel", "steel", "suede",
-        "synthetic", "tencel", "textile", "titanium", "tungsten", "velvet", "vinyl",
-        "viscose", "wood", "zinc",
-    }
-    COLORS = {
-        "aqua", "aquamarine", "apricot", "azure", "beige", "black", "blush", "blue",
-        "bronze", "brown", "burgundy", "camel", "charcoal", "chocolate", "clear",
-        "cobalt", "copper", "coral", "cream", "cyan", "ecru", "emerald", "fluorescent",
-        "fuchsia", "gold", "gray", "green", "grey", "indigo", "ivory", "khaki", "lavender", "lilac", "lime",
-        "magenta", "maroon", "mint", "multicolor", "mustard", "navy", "olive", "orange",
-        "neon", "peach", "periwinkle", "pink", "plum", "purple", "raspberry", "red", "rose",
-        "rust", "salmon", "sand", "scarlet", "silver", "slate", "tan", "taupe", "teal", "turquoise", "violet",
-        "white", "wine", "yellow",
-    }
-
-    @classmethod
-    def slot_kind(cls, value: str, source: str) -> str:
-        terms = set(_terms(value))
-        lowered = value.lower()
-        if source == "category": return "category"
-        if "budget" in lowered or "$" in value or "under " in lowered: return "budget"
-        if terms & cls.MATERIALS: return "material"
-        if "color" in terms or terms & cls.COLORS: return "color"
-        if terms & {"size", "sizing", "width", "wide", "narrow"}: return "size"
-        if terms & {"hiking", "running", "gym", "winter", "outdoor", "work"}: return "use_case"
-        if terms & {"style", "fit", "sleeve", "neck", "department"}: return "style"
-        return "feature"
-
-    @classmethod
-    def apply(cls, state: dict, observations: list[tuple[str, str]], turn: int, override: bool) -> None:
-        if override:
-            # An override erases prior soft preferences, while retaining the
-            # category and independently confirmed hard constraints.
-            for slot in state["slots"]:
-                if slot["active"] and slot["source"] == "preference":
-                    slot["active"] = False
-
-        active_values = {_normal(slot["value"]) for slot in state["slots"] if slot["active"]}
-        for value, source in observations:
-            normalized = _normal(value)
-            if not normalized or normalized in active_values:
-                continue
-            kind = cls.slot_kind(value, source)
-            if source == "override":
-                # A later override rewrites an earlier override of the same
-                # slot type but does not erase unrelated hard requirements.
-                for slot in state["slots"]:
-                    if slot["active"] and slot["source"] == "override" and slot["kind"] == kind:
-                        slot["active"] = False
-            if kind == "category":
-                for slot in state["slots"]:
-                    if slot["active"] and slot["kind"] == "category":
-                        slot["active"] = False
-            state["slots"].append({
-                "kind": kind, "value": value, "source": source,
-                "turn": turn, "active": True,
-            })
-            active_values.add(normalized)
-
-        state["constraints"] = [slot["value"] for slot in state["slots"] if slot["active"]]
-        state["phase"] = "intent_override" if override else (
-            "refinement" if len(state["constraints"]) > 1 else "discovery"
-        )
-
-
-class ContextProgram:
-    """Distill dialog memory and select the next runtime workflow."""
-
-    HISTORY_LIMIT = 6
-
-    @classmethod
-    def distill(cls, state: dict, user_message: str, turn: int) -> None:
-        state["history"].append({"turn": turn, "role": "user", "text": user_message[:500]})
-        del state["history"][:-cls.HISTORY_LIMIT]
-
-        declined = bool(re.search(
-            r"\b(?:don't have|do not have|no additional)\b.*\b(?:preference|requirement)\b",
-            user_message,
-            re.I,
-        ))
-        if declined and state.get("last_ask"):
-            state["long_term_profile"]["rejected_attributes"].add(state["last_ask"])
-
-        active_by_kind: dict[str, list[str]] = {}
-        learned: dict[str, list[str]] = {}
-        for slot in state["slots"]:
-            if not slot["active"]:
-                continue
-            active_by_kind.setdefault(slot["kind"], []).append(slot["value"])
-            if slot["source"] == "preference":
-                learned.setdefault(slot["kind"], []).append(slot["value"])
-        # Recompute rather than append forever, so overridden preferences are
-        # also removed from the distilled profile.
-        state["long_term_profile"]["learned_preferences"] = learned
-        learned_terms = _terms(" ".join(
-            value for values in learned.values() for value in values
-        ))
-        state["profile_terms"] = list(dict.fromkeys(
-            [*state["long_term_profile"]["base_tags"], *learned_terms]
-        ))
-        state["context_version"] += 1
-        state["short_term_context"] = {
-            "version": state["context_version"],
-            "intent": state["intent"],
-            "phase": state["phase"],
-            "active_slots": active_by_kind,
-            "recent_turns": list(state["history"]),
-            "turns_remaining": max(0, 10 - turn),
-            "declined_last_attribute": declined,
-        }
-
-    @staticmethod
-    def orchestrate(state: dict) -> None:
-        """Re-program the next retrieval and guidance workflow from context."""
-        slot_count = len(state["constraints"])
-        candidate_count = state["candidate_count"]
-        if state["phase"] == "intent_override":
-            strategy, allow_dense = "override_recovery", False
-        elif state["over_general"]:
-            strategy, allow_dense = "clarify_overload", False
-        elif state["intent"] == "buying":
-            strategy, allow_dense = "precision_filter", False
-        elif slot_count >= 3 or (candidate_count and candidate_count <= 40):
-            strategy, allow_dense = "focused_rerank", False
-        else:
-            strategy, allow_dense = "discovery_expand", True
-        state["workflow"] = {
-            "strategy": strategy,
-            "allow_dense": allow_dense,
-        }
-
-
-class NextQuestionSelector:
-    """Select the clarification with the greatest expected candidate reduction."""
-
-    FACET_TERMS = {
-        "material": frozenset(
-            term for value in DialogStateMachine.MATERIALS for term in _terms(value)
-        ),
-        "color": frozenset(
-            term for value in DialogStateMachine.COLORS for term in _terms(value)
-        ),
-        "size": frozenset({
-            "xxs", "xs", "small", "medium", "large", "xl", "xxl", "plus",
-            "petite", "wide", "narrow", "slim", "oversized",
-        }),
-        "style": frozenset({
-            "casual", "classic", "formal", "modern", "vintage", "boho", "sport",
-            "athletic", "relaxed", "fitted", "slim", "loose", "sleeveless", "hooded",
-        }),
-        "use_case": frozenset({
-            "running", "walking", "hiking", "work", "travel", "wedding", "party",
-            "gym", "outdoor", "winter", "summer", "school", "sleep", "swim",
-        }),
-    }
-    ANSWERABILITY = {
-        "material": .85,
-        "color": .75,
-        "size": .48,
-        "style": .55,
-        "use_case": .52,
-        "feature": .56,
-        "budget": .22,
-        "brand": .14,
-    }
-    PROMPTS = {
-        "material": "Do you have a preferred material or fabric?",
-        "color": "Is there a color or finish you want to prioritize?",
-        "size": "Are there any size, width, or fit requirements?",
-        "style": "Which style or fit would suit you best?",
-        "use_case": "What occasion or use case is this mainly for?",
-        "feature": "Is there a particular feature or construction detail you care about?",
-        "budget": "What price range would you like me to stay within?",
-        "brand": "Do you have a preferred brand?",
-        "other": "What are the one or two details that matter most for this item?",
-    }
-    QUESTION_ORDER = (
-        "other", "material", "color", "size", "style", "use_case",
-        "feature", "budget", "brand",
-    )
-
-    @classmethod
-    def score(
-        cls,
-        candidate_texts: list[str],
-        state: dict,
-        candidate_weights: list[float] | None = None,
-    ) -> dict[str, float]:
-        sample = candidate_texts[:500]
-        weights = (
-            candidate_weights[:len(sample)]
-            if candidate_weights and len(candidate_weights) >= len(sample)
-            else [1.0] * len(sample)
-        )
-        total = len(sample)
-        total_weight = sum(weights)
-        active_kinds = {
-            slot["kind"] for slot in state["slots"] if slot["active"]
-        }
-        known_terms: dict[str, set[str]] = {}
-        for slot in state["slots"]:
-            if slot["active"]:
-                known_terms.setdefault(slot["kind"], set()).update(_terms(slot.get("value", "")))
-        rejected = state["long_term_profile"]["rejected_attributes"]
-        scores: dict[str, float] = {}
-
-        for attribute, values in cls.FACET_TERMS.items():
-            groups: dict[tuple[str, ...], float] = {}
-            covered_mass = 0.0
-            residual_values = values - known_terms.get(attribute, set())
-            for text, weight in zip(sample, weights):
-                tokens = frozenset(text.split())
-                signature = tuple(sorted(tokens & residual_values))
-                if not signature:
-                    continue
-                covered_mass += weight
-                groups[signature] = groups.get(signature, 0.0) + weight
-            if total_weight:
-                coverage = covered_mass / total_weight
-                unresolved_fraction = sum(
-                    (mass / total_weight) ** 2 for mass in groups.values()
-                )
-                information_gain = max(0.0, coverage - unresolved_fraction)
-            else:
-                information_gain = 0.0
-            utility = information_gain * cls.ANSWERABILITY[attribute]
-            if attribute in active_kinds:
-                utility *= .18
-            if attribute in rejected:
-                utility *= .12
-            scores[attribute] = utility
-
-        # Features are open-ended and cannot be cleanly faceted from flattened
-        # text, so use a calibrated answerability prior with a small pool-size
-        # bonus. Budget and brand remain lower-cost fallbacks.
-        pool_bonus = min(.10, math.log1p(total) / 100.0) if total else 0.0
-        scores["feature"] = cls.ANSWERABILITY["feature"] + pool_bonus
-        scores["budget"] = cls.ANSWERABILITY["budget"]
-        scores["brand"] = cls.ANSWERABILITY["brand"]
-        for attribute in ("feature", "budget", "brand"):
-            if attribute in rejected:
-                scores[attribute] *= .12
-
-        best_specific = sorted(scores.values(), reverse=True)[:2]
-        combined = 0.0
-        for value in best_specific:
-            combined = 1.0 - (1.0 - combined) * (1.0 - value)
-        # `other` can reveal two constraints in the evaluator and represents a
-        # broad convergence prompt in production.
-        scores["other"] = min(.99, combined + .04)
-        return {name: round(value, 6) for name, value in scores.items()}
-
-    @classmethod
-    def choose(cls, state: dict) -> tuple[str | None, str, float]:
-        scores = state.get("question_scores", {})
-        available = {
-            attribute: score for attribute, score in scores.items()
-            if attribute not in state["asked"]
-        }
-        if not available:
-            return None, "These are the best matches based on the preferences you shared.", 0.0
-        priority = {name: index for index, name in enumerate(cls.QUESTION_ORDER)}
-        attribute, utility = min(
-            available.items(),
-            key=lambda pair: (-pair[1], priority.get(pair[0], len(priority))),
-        )
-        if (
-            attribute not in {"other", "feature"}
-            and "feature" in available
-            and utility < available["feature"] + .08
-        ):
-            attribute, utility = "feature", available["feature"]
-        return attribute, cls.PROMPTS[attribute], utility
 
 class Agent:
     """Grounded FTS retrieval with deterministic ranking by default."""
@@ -489,8 +147,8 @@ class Agent:
         """Extract every explicitly stated preference, including the category.
 
         Initial Buying messages deliberately contain both a category and a
-        requirement.  Treating the latter as a replacement for the former
-        makes common requirements (for example, ``leather``) search the whole
+        requirement. Treating the latter as a replacement for the former
+        makes common requirements (for example, leather) search the whole
         catalog, which is both less precise and less robust to catalog growth.
         """
         lower, values = message.lower(), []
@@ -555,7 +213,7 @@ class Agent:
                 )
 
         # The intersection route protects precision when several independent
-        # preferences have been disclosed.  Per-constraint routes below retain
+        # preferences have been disclosed. Per-constraint routes below retain
         # recall for incomplete, paraphrased, or overly-specific constraints.
         combined_terms: list[str] = []
         for constraint in constraints[:3]:
@@ -602,7 +260,7 @@ class Agent:
             add_rows(rows)
 
         # Browsing favors a second, diverse discovery route only when lexical
-        # evidence is thin.  Otherwise a broad vector route can dilute a
+        # evidence is thin. Otherwise a broad vector route can dilute a
         # high-confidence category match with merely similar catalog entries.
         if intent == "browsing" and allow_dense and len(candidates) < 80:
             add_rows(self._dense_rows(" ".join(constraints)))
@@ -633,7 +291,7 @@ class Agent:
             for index, constraint in enumerate(constraints):
                 slot_kind = active_slots[index]["kind"] if index < len(active_slots) else None
                 scoring_terms = _terms(constraint)
-                # ``color`` is a field label generated by the conversation
+                # color is a field label generated by the conversation
                 # protocol, not part of the requested value. Requiring that
                 # synthetic word would under-score products that simply say
                 # "red" or "navy" in their catalog copy.
@@ -687,7 +345,7 @@ class Agent:
             state["intent"] = "buying"
             state["intent_history"].append({"turn": turn, "intent": "buying"})
         # A declined clarification is not evidence that the user has supplied
-        # that slot. A broad `other` prompt may still be reframed, but a typed
+        # that slot. A broad other prompt may still be reframed, but a typed
         # attribute is recorded as declined and is not immediately repeated.
         if (
             re.search(r"\b(?:don't have|do not have|no additional)\b.*\b(?:preference|requirement)\b", user_message.lower())

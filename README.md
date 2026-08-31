@@ -42,7 +42,9 @@ official entry point, performance disclosures, limitations, and archive command.
 python3 -m evaluator.local_evaluator
 ```
 
-Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
+Edit the modules under `starter/` to implement your system. The `starter/agent.py`
+module remains the evaluator entry point. Do not edit the evaluator or public labels
+when reporting your local score.
 The command writes per-session results and aggregate metrics to `results.json`.
 
 ## Current Public Benchmark
@@ -131,7 +133,8 @@ docs/competition_specification.md participant rules and evaluation protocol
 docs/agent_api_contract.json      machine-readable Agent contract
 docs/evaluation_config.json       scoring configuration
 docs/baseline_results.json        reproducible weak-starter reference score
-starter/agent.py                  editable weak starter
+starter/                          editable modular weak starter
+starter/agent.py                  Agent entry point and compatibility exports
 evaluator/local_evaluator.py      public-set simulator and scorer
 ```
 

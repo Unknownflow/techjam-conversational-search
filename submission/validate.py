@@ -21,11 +21,9 @@ SECRET_VALUE_RE = re.compile(
 
 
 def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """Hash source bytes after normalizing platform-specific line endings."""
+    normalized = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(normalized).hexdigest()
 
 
 def import_roots(path: Path) -> set[str]:
@@ -67,15 +65,31 @@ def validate() -> dict:
             if SECRET_VALUE_RE.search(content):
                 raise RuntimeError(f"Possible embedded secret in {relative}")
 
-    source = ROOT / "src" / "agent.py"
-    unexpected_network = import_roots(source) & NETWORK_MODULES
-    if unexpected_network:
+    source_relatives = sorted(
+        relative
+        for relative in expected
+        if relative == "agent.py"
+        or (relative.startswith("src/") and relative.endswith(".py"))
+    )
+    expected_source_hashes = manifest.get("sha256", {})
+    if set(expected_source_hashes) != set(source_relatives):
+        missing_hashes = sorted(set(source_relatives) - set(expected_source_hashes))
+        unexpected_hashes = sorted(set(expected_source_hashes) - set(source_relatives))
         raise RuntimeError(
-            f"Network-capable imports are not permitted: {sorted(unexpected_network)}"
+            "Source hash manifest mismatch; "
+            f"missing={missing_hashes}, unexpected={unexpected_hashes}"
         )
-    expected_source_hash = manifest["sha256"]["src/agent.py"]
-    if sha256(source) != expected_source_hash:
-        raise RuntimeError("src/agent.py differs from the frozen manifest hash")
+
+    for relative in source_relatives:
+        source = ROOT / relative
+        unexpected_network = import_roots(source) & NETWORK_MODULES
+        if unexpected_network:
+            raise RuntimeError(
+                f"Network-capable imports are not permitted in {relative}: "
+                f"{sorted(unexpected_network)}"
+            )
+        if sha256(source) != expected_source_hashes[relative]:
+            raise RuntimeError(f"{relative} differs from the frozen manifest hash")
 
     try:
         from .agent import Agent
