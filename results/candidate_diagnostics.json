@@ -1,0 +1,316 @@
+{
+  "sample_count": 200,
+  "late_turn_threshold": 6,
+  "aggregate_metrics": {
+    "sample_count": 200,
+    "hit_rate_at_10": 1.0,
+    "mrr": 0.967464,
+    "mttc": 2.09,
+    "efficiency": 0.891,
+    "technical_score": 0.968439
+  },
+  "failure_summary": {
+    "hit": 200
+  },
+  "scenario_failure_summary": {
+    "boundary": {
+      "hit": 10
+    },
+    "browsing": {
+      "hit": 80
+    },
+    "buying": {
+      "hit": 80
+    },
+    "intent_override": {
+      "hit": 30
+    }
+  },
+  "scenario_metrics": {
+    "boundary": {
+      "sample_count": 10,
+      "hit_rate_at_10": 1.0,
+      "mrr": 0.91,
+      "mttc": 2.6,
+      "efficiency": 0.84,
+      "technical_score": 0.941
+    },
+    "browsing": {
+      "sample_count": 80,
+      "hit_rate_at_10": 1.0,
+      "mrr": 0.95625,
+      "mttc": 1.925,
+      "efficiency": 0.9075,
+      "technical_score": 0.968375
+    },
+    "buying": {
+      "sample_count": 80,
+      "hit_rate_at_10": 1.0,
+      "mrr": 0.983036,
+      "mttc": 1.575,
+      "efficiency": 0.9425,
+      "technical_score": 0.983411
+    },
+    "intent_override": {
+      "sample_count": 30,
+      "hit_rate_at_10": 1.0,
+      "mrr": 0.975,
+      "mttc": 3.733333,
+      "efficiency": 0.726667,
+      "technical_score": 0.937833
+    }
+  },
+  "rank_distribution": {
+    "1": 190,
+    "10": 1,
+    "2": 5,
+    "4": 3,
+    "7": 1
+  },
+  "turn_distribution": {
+    "1": 69,
+    "2": 68,
+    "3": 40,
+    "4": 22,
+    "5": 1
+  },
+  "candidate_rank_distribution": {
+    "1": 190,
+    "10": 1,
+    "2": 5,
+    "4": 3,
+    "7": 1
+  },
+  "optimization_targets": {
+    "late_conversions": [],
+    "low_mrr_hits": [
+      "public_0020",
+      "public_0076",
+      "public_0099",
+      "public_0144",
+      "public_0187"
+    ],
+    "ranking_misses": [],
+    "retrieval_misses": []
+  },
+  "improvement_focus": {
+    "retrieval_routes": {
+      "metric": "best_candidate_rank",
+      "why": "High values mean the target entered the working set too weakly; not_retrieved means route recall failed.",
+      "underperformance_rule": "target not retrieved, or best_candidate_rank > 10",
+      "priority_sessions_to_inspect_first": []
+    },
+    "ranking_weights": {
+      "metric": "best_rank",
+      "why": "High values mean the target was returned low in Top-K; misses mean ranking/truncation did not surface it.",
+      "underperformance_rule": "miss, or returned best_rank > 1",
+      "priority_sessions_to_inspect_first": [
+        {
+          "sample_id": "public_0187",
+          "scenario_type": "boundary",
+          "metric": "best_rank",
+          "metric_value": 10,
+          "failure_mode": "hit",
+          "first_hit_turn": 4,
+          "best_rank": 10,
+          "best_candidate_rank": 10,
+          "target_ever_retrieved": true,
+          "last_ask_attribute": "style",
+          "last_candidate_count": 1189,
+          "last_strategy": "focused_rerank",
+          "active_constraints": [
+            "Shoes Loafers & Slip-Ons",
+            "leather",
+            "100% Leather"
+          ]
+        },
+        {
+          "sample_id": "public_0020",
+          "scenario_type": "buying",
+          "metric": "best_rank",
+          "metric_value": 7,
+          "failure_mode": "hit",
+          "first_hit_turn": 3,
+          "best_rank": 7,
+          "best_candidate_rank": 7,
+          "target_ever_retrieved": true,
+          "last_ask_attribute": "feature",
+          "last_candidate_count": 1923,
+          "last_strategy": "precision_filter",
+          "active_constraints": [
+            "Novelty Women",
+            "cotton",
+            "color: grey",
+            "Solid colors: 100% Cotton",
+            "Heather Grey: 90% Cotton, 10% Polyester",
+            "All Other Heathers: 50% Cotton, 50% Polyester",
+            "Imported"
+          ]
+        },
+        {
+          "sample_id": "public_0076",
+          "scenario_type": "browsing",
+          "metric": "best_rank",
+          "metric_value": 4,
+          "failure_mode": "hit",
+          "first_hit_turn": 3,
+          "best_rank": 4,
+          "best_candidate_rank": 4,
+          "target_ever_retrieved": true,
+          "last_ask_attribute": "feature",
+          "last_candidate_count": 1634,
+          "last_strategy": "focused_rerank",
+          "active_constraints": [
+            "Women Hoodies",
+            "cotton",
+            "color: grey",
+            "Solid colors: 80% Cotton, 20% Polyester",
+            "Heather Grey: 78% Cotton, 22% Poly",
+            "Dark Heather: 50% Cotton, 50% Polyester",
+            "Imported"
+          ]
+        }
+      ]
+    },
+    "dialog_clarification_policy": {
+      "metric": "first_hit_turn",
+      "why": "High values mean the agent needed too many turns before collecting enough useful evidence.",
+      "underperformance_rule": "miss, or first_hit_turn > 2",
+      "priority_sessions_to_inspect_first": [
+        {
+          "sample_id": "public_0144",
+          "scenario_type": "intent_override",
+          "metric": "first_hit_turn",
+          "metric_value": 5,
+          "failure_mode": "hit",
+          "first_hit_turn": 5,
+          "best_rank": 4,
+          "best_candidate_rank": 4,
+          "target_ever_retrieved": true,
+          "last_ask_attribute": "other",
+          "last_candidate_count": 1425,
+          "last_strategy": "precision_filter",
+          "active_constraints": [
+            "Jackets & Vests Down Jackets & Parkas",
+            "polyester",
+            "100% Polyester",
+            "Imported",
+            "Zipper closure"
+          ]
+        },
+        {
+          "sample_id": "public_0002",
+          "scenario_type": "intent_override",
+          "metric": "first_hit_turn",
+          "metric_value": 4,
+          "failure_mode": "hit",
+          "first_hit_turn": 4,
+          "best_rank": 1,
+          "best_candidate_rank": 1,
+          "target_ever_retrieved": true,
+          "last_ask_attribute": "feature",
+          "last_candidate_count": 1608,
+          "last_strategy": "precision_filter",
+          "active_constraints": [
+            "Accessories Belts",
+            "leather",
+            "100% Leather",
+            "Imported",
+            "Buckle closure"
+          ]
+        },
+        {
+          "sample_id": "public_0013",
+          "scenario_type": "intent_override",
+          "metric": "first_hit_turn",
+          "metric_value": 4,
+          "failure_mode": "hit",
+          "first_hit_turn": 4,
+          "best_rank": 1,
+          "best_candidate_rank": 1,
+          "target_ever_retrieved": true,
+          "last_ask_attribute": "other",
+          "last_candidate_count": 775,
+          "last_strategy": "override_recovery",
+          "active_constraints": [
+            "Shoes Slippers",
+            "Rubber sole",
+            "Textile Upper. Textile Covered EVA Footbed. Rubber Outsole",
+            "Received APMA (American Podiatric Medical Association) Seal of Acceptance",
+            "YOUR NEW FAVORITE SLIPPERS: Slip into divine comfort with Gemma, a plush mule-style spa slipper with an adjustable hook-and-loop closure across the vamp"
+          ]
+        }
+      ]
+    },
+    "intent_override_handling": {
+      "metric": "first_hit_turn_on_intent_override",
+      "why": "High values identify sessions where replacement intent still took too long to recover.",
+      "underperformance_rule": "intent_override miss, or first_hit_turn > 3",
+      "priority_sessions_to_inspect_first": [
+        {
+          "sample_id": "public_0144",
+          "scenario_type": "intent_override",
+          "metric": "first_hit_turn",
+          "metric_value": 5,
+          "failure_mode": "hit",
+          "first_hit_turn": 5,
+          "best_rank": 4,
+          "best_candidate_rank": 4,
+          "target_ever_retrieved": true,
+          "last_ask_attribute": "other",
+          "last_candidate_count": 1425,
+          "last_strategy": "precision_filter",
+          "active_constraints": [
+            "Jackets & Vests Down Jackets & Parkas",
+            "polyester",
+            "100% Polyester",
+            "Imported",
+            "Zipper closure"
+          ]
+        },
+        {
+          "sample_id": "public_0002",
+          "scenario_type": "intent_override",
+          "metric": "first_hit_turn",
+          "metric_value": 4,
+          "failure_mode": "hit",
+          "first_hit_turn": 4,
+          "best_rank": 1,
+          "best_candidate_rank": 1,
+          "target_ever_retrieved": true,
+          "last_ask_attribute": "feature",
+          "last_candidate_count": 1608,
+          "last_strategy": "precision_filter",
+          "active_constraints": [
+            "Accessories Belts",
+            "leather",
+            "100% Leather",
+            "Imported",
+            "Buckle closure"
+          ]
+        },
+        {
+          "sample_id": "public_0013",
+          "scenario_type": "intent_override",
+          "metric": "first_hit_turn",
+          "metric_value": 4,
+          "failure_mode": "hit",
+          "first_hit_turn": 4,
+          "best_rank": 1,
+          "best_candidate_rank": 1,
+          "target_ever_retrieved": true,
+          "last_ask_attribute": "other",
+          "last_candidate_count": 775,
+          "last_strategy": "override_recovery",
+          "active_constraints": [
+            "Shoes Slippers",
+            "Rubber sole",
+            "Textile Upper. Textile Covered EVA Footbed. Rubber Outsole",
+            "Received APMA (American Podiatric Medical Association) Seal of Acceptance",
+            "YOUR NEW FAVORITE SLIPPERS: Slip into divine comfort with Gemma, a plush mule-style spa slipper with an adjustable hook-and-loop closure across the vamp"
+          ]
+        }
+      ]
+    }
+  }
+}
